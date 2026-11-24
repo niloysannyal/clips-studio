@@ -12,6 +12,11 @@ export interface JobProgress {
   videoId: string
   /** Remote rendering only: where the current clip is ("on Gaming PC · rendering"). */
   remote?: string
+  jobType?: 'process' | 'render' | 'translate'
+  jobId?: number
+  clipId?: number
+  clipTitle?: string
+  clipDuration?: number
 }
 
 const STAGES: Record<string, { base: number; weight: number; label: string }> = {
@@ -53,8 +58,19 @@ export const progressStore: { current: JobProgress } = { current: { ...emptyProg
 
 export function applyEvent(p: JobProgress, e: StudioEvent): JobProgress {
   if (e.type === 'job') {
-    if (e.status === 'running')
-      return { ...emptyProgress, active: true, label: 'Starting…', startedAt: Date.now() }
+    if (e.status === 'running') {
+      const isRender = e.job_type === 'render'
+      return {
+        ...emptyProgress,
+        active: true,
+        label: isRender ? 'Re-rendering 9:16 layout…' : 'Starting…',
+        fraction: isRender ? 0.05 : 0,
+        startedAt: Date.now(),
+        jobType: e.job_type,
+        jobId: e.job_id,
+        clipId: e.clip_id
+      }
+    }
     if (e.status === 'done' || e.status === 'failed' || e.status === 'cancelled')
       return { ...emptyProgress }
   }
@@ -104,11 +120,28 @@ export function applyEvent(p: JobProgress, e: StudioEvent): JobProgress {
   }
 }
 
+/** Dynamic fraction that smoothly advances during single-clip re-renders
+ *  even before intermediate progress events arrive. */
+export function currentFraction(p: JobProgress, now: number): number {
+  if (!p.active) return 0
+  if (p.jobType === 'render' || p.label.toLowerCase().includes('re-render')) {
+    const elapsed = Math.max(0, (now - p.startedAt) / 1000)
+    const target = p.clipDuration ? Math.max(45, p.clipDuration * 2 + 10) : 83
+    return Math.min(0.95, Math.max(0.05, 0.05 + 0.90 * (elapsed / target)))
+  }
+  return p.fraction
+}
+
 /** Remaining seconds, extrapolated from elapsed time vs fraction complete.
  *  Recomputed against a live clock, so it counts down between events. */
 export function etaSeconds(p: JobProgress, now: number): number | null {
-  if (!p.active || p.fraction < 0.06) return null // too early to estimate honestly
+  if (!p.active) return null
   const elapsed = (now - p.startedAt) / 1000
+  if (p.jobType === 'render' || p.label.toLowerCase().includes('re-render')) {
+    const target = p.clipDuration ? Math.max(45, p.clipDuration * 2 + 10) : 83
+    return Math.max(3, Math.round(target - elapsed))
+  }
+  if (p.fraction < 0.06) return null // too early to estimate honestly
   return Math.max(0, (elapsed * (1 - p.fraction)) / p.fraction)
 }
 

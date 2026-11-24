@@ -300,6 +300,8 @@ export interface CaptionStyle {
   /** Another colour for whoever isn't the main speaker (#126). */
   second_speaker?: boolean
   second_speaker_color?: string
+  /** Normalized vertical center Y position (0.0 = top, 1.0 = bottom) for placement e.g. in blur zones. */
+  caption_y?: number
 }
 
 export type FilterName =
@@ -440,6 +442,8 @@ export interface GamingSettings {
   game_box?: FrameBox | null
   /** 'fit': the game whole, right against the webcam, blur above and below the two; 'fill': zoomed to fill. */
   game_fit?: 'fit' | 'fill'
+  /** Vertical placement of fitted gameplay in its container: 'top' (flush with cam), 'center', or 'bottom'. */
+  game_anchor?: 'top' | 'center' | 'bottom'
   /** The stream's solid panels (a black chat bar, a splits timer), kept out of the game. */
   panels?: FrameBox[]
   /** Where the facecams and the Game UI were put on the Short: fractions of its width and height. */
@@ -447,6 +451,8 @@ export interface GamingSettings {
   /** Written by the render: what the clip actually got. */
   layout?: 'split' | 'fill'
   used_cam?: FrameBox | null
+  /** Normalized vertical center Y position (0.0 = top, 1.0 = bottom) for captions in this layout. */
+  caption_y?: number
 }
 
 export interface Clip {
@@ -504,6 +510,10 @@ export interface JobOptions {
   gaming_layout?: GamingSettings
   /** ...and kept for this creator's next videos. */
   gaming_remember?: boolean
+  clip_id?: number
+  render_opts?: any
+  start?: number
+  end?: number
   /** `shorts`: also make the 9:16 Shorts, in the same job (#98). */
   longform?: { mode: string; shorts?: boolean } | null
   watermark_profile_id?: number | null

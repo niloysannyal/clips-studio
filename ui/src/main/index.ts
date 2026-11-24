@@ -358,7 +358,21 @@ function setAsideBigOllamaLog(): void {
   }
 }
 
-function startBackend(): void {
+async function startBackend(): Promise<void> {
+  if (process.env.BACKEND_EXTERNAL === '1') {
+    return
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/health`, { signal: AbortSignal.timeout(1000) })
+    if (res.ok) {
+      console.log(`Backend already running on port ${API_PORT}; attaching without respawning.`)
+      return
+    }
+  } catch {
+    // Backend not running, proceed to spawn
+  }
+
   // Windows gives a spawned process the system locale's encoding, which is
   // cp1252 on most Western installs — and printing a title with an emoji in
   // it then throws UnicodeEncodeError and kills the backend. A developer's
@@ -393,9 +407,25 @@ function startBackend(): void {
       env: backendEnv,
       windowsHide: true
     })
-  } else if (process.env.BACKEND_EXTERNAL !== '1') {
-    const repoRoot = join(app.getAppPath(), '..')
-    backend = spawn('python', ['main.py', 'serve', '--port', String(API_PORT)], {
+  } else {
+    const repoRoot = existsSync(join(app.getAppPath(), '..', 'main.py'))
+      ? join(app.getAppPath(), '..')
+      : join(__dirname, '../../..')
+    const candidates = [
+      join(repoRoot, 'venv', 'Scripts', 'python.exe'),
+      join(repoRoot, '.venv', 'Scripts', 'python.exe'),
+      join(repoRoot, 'venv', 'bin', 'python'),
+      join(repoRoot, '.venv', 'bin', 'python')
+    ]
+    const pythonExe = candidates.find((c) => existsSync(c)) || 'python'
+    const venvScripts = join(repoRoot, 'venv', 'Scripts')
+    if (existsSync(venvScripts)) {
+      backendEnv.PATH = `${venvScripts};${backendEnv.PATH || process.env.PATH || ''}`
+    }
+    if (!backendEnv.HF_HOME) backendEnv.HF_HOME = 'D:\\autoclip-data\\hf_cache'
+    if (!backendEnv.TEMP) backendEnv.TEMP = 'D:\\autoclip-data\\temp'
+    if (!backendEnv.TMP) backendEnv.TMP = 'D:\\autoclip-data\\temp'
+    backend = spawn(pythonExe, ['main.py', 'serve', '--port', String(API_PORT)], {
       cwd: repoRoot,
       stdio: 'inherit',
       env: backendEnv
@@ -864,7 +894,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', showWindow)
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // Windows shows the AppUserModelID as the notification's app name; without
     // it a toast is attributed to "electron.app.Electron". Must match
     // electron-builder.yml's appId so dev and packaged builds agree.
@@ -873,7 +903,7 @@ if (!app.requestSingleInstanceLock()) {
     // Ollama first: it takes a moment to bind its port, and starting it before
     // the engine means the first preflight is more likely to find it up.
     startOllama()
-    startBackend()
+    await startBackend()
     createWindow()
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()

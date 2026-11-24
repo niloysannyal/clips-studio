@@ -60,7 +60,7 @@ export const LAYOUTS = {
       "divider": [
         0.25,
         0.5,
-        0.38
+        0.32
       ],
       "order": "cam_top",
       "game_fit": "fill"
@@ -209,6 +209,25 @@ export const LAYOUTS = {
       ],
       "order": "cam_top",
       "game_fit": "fill"
+    },
+    "custom": {
+      "label": "Custom",
+      "type": "stack",
+      "rows": [
+        [
+          "cam"
+        ],
+        [
+          "game"
+        ]
+      ],
+      "divider": [
+        0.15,
+        0.75,
+        0.32
+      ],
+      "order": "cam_top",
+      "game_fit": "fit"
     }
   }
 } as const

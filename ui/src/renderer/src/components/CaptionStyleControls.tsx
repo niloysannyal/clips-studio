@@ -3,16 +3,17 @@ import type { CaptionStyle } from '../lib/types'
 import { t } from '../lib/i18n'
 
 export const DEFAULT_CAPTION_STYLE: Required<CaptionStyle> = {
-  font: 'Arial',
+  font: 'Impact',
   font_size: 84,
   color: '#FFFFFF',
   position: 'bottom',
-  words_per_caption: 3,
+  words_per_caption: 2,
   uppercase: true,
-  highlight: false,
+  highlight: true,
   highlight_color: '#FFE600',
   second_speaker: false,
-  second_speaker_color: '#5CE1FF'
+  second_speaker_color: '#5CE1FF',
+  caption_y: 0.88
 }
 
 /** Fonts on every stock Windows install — matches video/captions.py FONTS. */
@@ -45,14 +46,20 @@ function CaptionExample({ style }: { style: Required<CaptionStyle> }): JSX.Eleme
     return () => clearInterval(id)
   }, [style.highlight, words.length])
   const align =
-    style.position === 'top' ? 'items-start' : style.position === 'middle' ? 'items-center' : 'items-end'
+    style.caption_y !== undefined
+      ? ''
+      : style.position === 'top'
+        ? 'items-start'
+        : style.position === 'middle'
+          ? 'items-center'
+          : 'items-end'
   return (
     <div
       className={`relative rounded-lg bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900 aspect-[9/16] max-h-44 mx-auto w-auto flex ${align} justify-center overflow-hidden`}
       aria-label={t('Caption style example')}
     >
       <p
-        className="text-center px-2 py-4 leading-tight"
+        className="text-center px-2 py-4 leading-tight w-full"
         style={{
           fontFamily: `'${style.font}', sans-serif`,
           color: style.color,
@@ -60,7 +67,10 @@ function CaptionExample({ style }: { style: Required<CaptionStyle> }): JSX.Eleme
           fontSize: `${(style.font_size / 1920) * 176 * 2.2}px`,
           fontWeight: 700,
           WebkitTextStroke: '0.8px black',
-          textShadow: '1px 1px 2px rgba(0,0,0,0.9)'
+          textShadow: '1px 1px 2px rgba(0,0,0,0.9)',
+          ...(style.caption_y !== undefined
+            ? { position: 'absolute', top: `${style.caption_y * 100}%`, transform: 'translateY(-50%)', left: 0, right: 0 }
+            : {})
         }}
       >
         {style.highlight
@@ -157,7 +167,13 @@ export default function CaptionStyleControls({
             id={`${idPrefix}-pos`}
             className="input mt-1"
             value={style.position}
-            onChange={(e) => onChange('position', e.target.value as CaptionStyle['position'])}
+            onChange={(e) => {
+              const pos = e.target.value as CaptionStyle['position']
+              onChange('position', pos)
+              if (pos === 'top') onChange('caption_y', 0.15)
+              else if (pos === 'middle') onChange('caption_y', 0.50)
+              else if (pos === 'bottom') onChange('caption_y', 0.88)
+            }}
           >
             <option value="bottom">Bottom</option>
             <option value="middle">Middle</option>
@@ -183,6 +199,72 @@ export default function CaptionStyleControls({
             </select>
           </div>
         )}
+        <div className="col-span-2 space-y-1.5 pt-2 border-t border-slate-700/60">
+          <div className="flex items-center justify-between text-xs text-muted">
+            <span className="font-semibold text-slate-300">
+              Vertical Position ({Math.round((style.caption_y ?? 0.88) * 100)}%)
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                  Math.abs((style.caption_y ?? 0.88) - 0.35) < 0.04
+                    ? 'bg-sky-500 text-black font-semibold'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+                onClick={() => {
+                  onChange('caption_y', 0.35)
+                  onChange('position', 'middle')
+                }}
+              >
+                Upper Blur (35%)
+              </button>
+              <button
+                type="button"
+                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                  Math.abs((style.caption_y ?? 0.88) - 0.50) < 0.04
+                    ? 'bg-sky-500 text-black font-semibold'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+                onClick={() => {
+                  onChange('caption_y', 0.50)
+                  onChange('position', 'middle')
+                }}
+              >
+                Center (50%)
+              </button>
+              <button
+                type="button"
+                className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                  Math.abs((style.caption_y ?? 0.88) - 0.88) < 0.04
+                    ? 'bg-sky-500 text-black font-semibold'
+                    : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                }`}
+                onClick={() => {
+                  onChange('caption_y', 0.88)
+                  onChange('position', 'bottom')
+                }}
+              >
+                Lower Blur (88%)
+              </button>
+            </div>
+          </div>
+          <input
+            id={`${idPrefix}-caption-y`}
+            type="range"
+            min={10}
+            max={92}
+            className="w-full accent-[#38BDF8] h-1.5"
+            value={Math.round((style.caption_y ?? 0.88) * 100)}
+            onChange={(e) => {
+              const val = Number(e.target.value) / 100
+              onChange('caption_y', val)
+              if (val < 0.30) onChange('position', 'top')
+              else if (val > 0.70) onChange('position', 'bottom')
+              else onChange('position', 'middle')
+            }}
+          />
+        </div>
       </div>
       <label className="flex items-center gap-2 cursor-pointer text-sm">
         <input

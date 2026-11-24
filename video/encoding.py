@@ -35,6 +35,14 @@ _CANDIDATES: dict[str, list[str]] = {
     "videotoolbox": ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-maxrate", "12M"],
 }
 
+_PREVIEW_ARGS: dict[str, list[str]] = {
+    "nvenc": ["-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull", "-rc", "vbr", "-cq", "26", "-b:v", "0"],
+    "amf": ["-c:v", "h264_amf", "-quality", "speed", "-b:v", "6M"],
+    "qsv": ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "26"],
+    "videotoolbox": ["-c:v", "h264_videotoolbox", "-realtime", "true", "-b:v", "6M"],
+    "cpu": ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"],
+}
+
 _selected: tuple[str, list[str]] | None = None  # cached (name, args)
 
 
@@ -182,12 +190,14 @@ def sampled_frames(clip_path, every: int, width: int, height: int, hwaccel: bool
         proc.wait()
 
 
-def video_encoder_args(config: dict | None = None) -> list[str]:
+def video_encoder_args(config: dict | None = None, preview: bool = False) -> list[str]:
     """The `-c:v ...` argument block for FFmpeg output encoding."""
     global _selected
     mode = (config or {}).get("video", {}).get("encoder", "auto")
     if _selected is None or (mode != "auto" and _selected[0] != mode):
         _selected = _select(mode)
+    if preview:
+        return _PREVIEW_ARGS.get(_selected[0], _PREVIEW_ARGS["cpu"])
     return _selected[1]
 
 

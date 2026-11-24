@@ -144,6 +144,14 @@ def clean_gaming(settings: dict | None) -> dict:
         out["game_align"] = settings["game_align"]
     if settings.get("game_fit") in ("fit", "fill"):
         out["game_fit"] = settings["game_fit"]
+    if settings.get("game_anchor") in ("top", "center", "bottom"):
+        out["game_anchor"] = settings["game_anchor"]
+    if settings.get("caption_y") is not None:
+        try:
+            cy = float(settings["caption_y"])
+            out["caption_y"] = round(min(max(cy, 0.0), 1.0), 4)
+        except (ValueError, TypeError):
+            pass
     if isinstance(settings.get("panels"), list):
         # The stream's solid panels, as found (gaming/panels.py): a few boxes.
         panels = [_unit_box(b) for b in settings["panels"][:8]]

@@ -1,13 +1,25 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { getExportFolder, pickExportFolder, setExportFolder } from '../lib/exportFolder'
 import { Folder, Scissors } from './icons'
-import type { Clip, PluginNote } from '../lib/types'
+import type { Clip, PluginNote, RenderOpts } from '../lib/types'
 import { t } from '../lib/i18n'
 import { sportMoment } from '../lib/sports'
 import { suggestionLine } from '../lib/editSuggestions'
+import { TEMPLATES, type TemplatePreset } from '../lib/templates'
 
 const CHANNELS = ['text', 'audio', 'visual', 'reaction', 'engagement'] as const
+
+function formatTime(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`
+  }
+  return `${m}:${sec.toString().padStart(2, '0')}`
+}
 
 /** A clip's plugin notes, one line per plugin (and version), in the order they came. */
 function pluginNotes(notes: PluginNote[] | undefined): { key: string; who: string; texts: string[] }[] {
@@ -41,6 +53,9 @@ export default function ClipEditor({
   const [start, setStart] = useState(clip.start_s)
   const [end, setEnd] = useState(clip.end_s)
   const [folder, setFolder] = useState('')
+  const [activeRenderOpts, setActiveRenderOpts] = useState<RenderOpts>(clip.render_opts ?? {})
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('viral_split_70_30')
+  const [showExactNumbers, setShowExactNumbers] = useState(false)
 
   // Default the export destination to the remembered folder / OS Downloads.
   useEffect(() => {
@@ -55,6 +70,7 @@ export default function ClipEditor({
     setHashtags(clip.hashtags.join(' '))
     setStart(clip.start_s)
     setEnd(clip.end_s)
+    setActiveRenderOpts(clip.render_opts ?? {})
     setNotice(null)
   }, [clip.id])
 
@@ -88,8 +104,8 @@ export default function ClipEditor({
   const rerender = (): Promise<void> =>
     run('render', async () => {
       const range = start !== clip.start_s || end !== clip.end_s ? { start, end } : undefined
-      await api.rerenderClip(clip.id, range)
-      flash('Re-render queued — watch the Dashboard activity feed')
+      await api.rerenderClip(clip.id, range, activeRenderOpts)
+      flash('Re-render queued with template — watch the Dashboard / Queue')
     })
 
   const exportOne = (): Promise<void> =>
@@ -220,27 +236,197 @@ export default function ClipEditor({
           <label className="label">Hashtags (space-separated)</label>
           <input className="input mt-1" value={hashtags} onChange={(e) => setHashtags(e.target.value)} />
         </div>
-        <div className="flex gap-3">
-          <div className="flex-1">
-            <label className="label">Start (s)</label>
-            <input
-              type="number"
-              className="input mt-1"
-              value={start}
-              step={0.5}
-              onChange={(e) => setStart(Number(e.target.value))}
-            />
+
+        {/* --- Master Viral Templates --- */}
+        <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-accent">Viral Format Templates</span>
+            <span className="text-[11px] text-muted">1-Click Layout & Captions</span>
           </div>
-          <div className="flex-1">
-            <label className="label">End (s)</label>
-            <input
-              type="number"
-              className="input mt-1"
-              value={end}
-              step={0.5}
-              onChange={(e) => setEnd(Number(e.target.value))}
-            />
+          <div className="grid grid-cols-2 gap-1.5">
+            {TEMPLATES.map((tmpl) => {
+              const active = selectedTemplateId === tmpl.id
+              return (
+                <button
+                  key={tmpl.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedTemplateId(tmpl.id)
+                    setActiveRenderOpts(tmpl.renderOpts)
+                    flash(`Applied ${tmpl.name}! Click 'Re-render' to render video.`)
+                  }}
+                  className={`text-left p-2 rounded-md border text-xs transition-all ${
+                    active
+                      ? 'border-accent bg-accent/20 text-ink font-semibold shadow-sm'
+                      : 'border-raised/60 bg-base/60 text-muted hover:text-ink hover:border-accent/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="truncate">{tmpl.name}</span>
+                    <span className="text-[10px] text-accent font-normal">{tmpl.format === 'shorts' ? '9:16' : '16:9'}</span>
+                  </div>
+                  <p className="text-[10px] text-muted line-clamp-1 mt-0.5">{tmpl.badge}</p>
+                </button>
+              )
+            })}
           </div>
+        </div>
+
+        {/* --- Visual Range Trimmer & Monetization Badge --- */}
+        <div className="rounded-lg border border-raised/60 bg-raised/30 p-3 space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-1">
+            <span className="text-xs font-semibold text-ink">Clip Boundaries & Trimmer</span>
+            <span
+              className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                end - start >= 60.0
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+              }`}
+            >
+              {end - start >= 60.0 ? '🟢 Monetized (>60s) · High RPM' : '🟡 Under 60s · Viral Hook'}
+            </span>
+          </div>
+
+          {/* Time & Duration summary */}
+          <div className="flex justify-between items-center text-xs text-muted">
+            <span>
+              Start: <strong className="text-ink font-mono">{formatTime(start)}</strong> ({start.toFixed(1)}s)
+            </span>
+            <span className="text-accent font-semibold">
+              {(end - start).toFixed(1)}s total
+            </span>
+            <span>
+              End: <strong className="text-ink font-mono">{formatTime(end)}</strong> ({end.toFixed(1)}s)
+            </span>
+          </div>
+
+          {/* Visual Dual Sliders */}
+          <div className="space-y-2">
+            <div>
+              <div className="flex justify-between text-[11px] text-muted mb-0.5">
+                <span>Start Point (Drag left/right)</span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setStart((s) => Math.max(0, s - 5))}
+                  >
+                    -5s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setStart((s) => Math.max(0, s - 1))}
+                  >
+                    -1s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setStart((s) => Math.min(end - 3, s + 1))}
+                  >
+                    +1s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setStart((s) => Math.min(end - 3, s + 5))}
+                  >
+                    +5s
+                  </button>
+                </div>
+              </div>
+              <input
+                type="range"
+                className="w-full accent-[#38BDF8] cursor-pointer"
+                min={Math.max(0, clip.start_s - 120)}
+                max={end - 3}
+                step={0.5}
+                value={start}
+                onChange={(e) => setStart(Number(e.target.value))}
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-[11px] text-muted mb-0.5">
+                <span>End Point (Drag left/right)</span>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setEnd((e) => Math.max(start + 3, e - 5))}
+                  >
+                    -5s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setEnd((e) => Math.max(start + 3, e - 1))}
+                  >
+                    -1s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setEnd((e) => e + 1)}
+                  >
+                    +1s
+                  </button>
+                  <button
+                    type="button"
+                    className="px-1.5 py-0.5 rounded bg-raised text-[10px] hover:text-ink"
+                    onClick={() => setEnd((e) => e + 5)}
+                  >
+                    +5s
+                  </button>
+                </div>
+              </div>
+              <input
+                type="range"
+                className="w-full accent-[#38BDF8] cursor-pointer"
+                min={start + 3}
+                max={clip.end_s + 120}
+                step={0.5}
+                value={end}
+                onChange={(e) => setEnd(Number(e.target.value))}
+              />
+            </div>
+          </div>
+
+          <div className="text-right">
+            <button
+              type="button"
+              className="text-[11px] text-muted hover:text-ink underline"
+              onClick={() => setShowExactNumbers(!showExactNumbers)}
+            >
+              {showExactNumbers ? 'Hide numeric seconds' : 'Type exact numeric seconds'}
+            </button>
+          </div>
+
+          {showExactNumbers && (
+            <div className="flex gap-3 pt-1 border-t border-raised/40">
+              <div className="flex-1">
+                <label className="label text-[11px]">Start (s)</label>
+                <input
+                  type="number"
+                  className="input mt-0.5 text-xs !py-1"
+                  value={start}
+                  step={0.5}
+                  onChange={(e) => setStart(Number(e.target.value))}
+                />
+              </div>
+              <div className="flex-1">
+                <label className="label text-[11px]">End (s)</label>
+                <input
+                  type="number"
+                  className="input mt-0.5 text-xs !py-1"
+                  value={end}
+                  step={0.5}
+                  onChange={(e) => setEnd(Number(e.target.value))}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

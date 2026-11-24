@@ -259,9 +259,9 @@ def resolve(settings: dict) -> dict:
     s = dict(settings or {})
     preset = s.get("preset")
     if preset not in PRESETS:
-        preset = "half"
+        preset = "split"
         s.setdefault("order", "game_top" if s.get("cam_position") == "bottom" else "cam_top")
-        s.setdefault("game_fit", s.get("game_fit") or "fit")
+        s.setdefault("game_fit", s.get("game_fit") or "fill")
     spec = PRESETS[preset]
     roles = _roles(spec)
     if "cam" in roles and not s.get("cam"):
@@ -424,16 +424,12 @@ def plan(src_w: int, src_h: int, settings: dict, heads: dict | None = None) -> P
         regions = _stack_regions(spec, order, s.get("divider"))
         whole = None
         if fit == "fit":
-            # The whole game right against the webcam: its row is the game's
-            # own height, and what's left is blur above and below the two.
             space = next(dest for role, dest, _a in regions if role == "game")
             whole = _game_src(src_w, src_h, s, space[2] / space[3], fit, shown_cams, panels)
-            regions = _stack_regions(spec, order, s.get("divider"), OUT_W * whole[3] / whole[2], safe["top"])
-            if regions[0][1][1] > 0 or regions[-1][1][1] + regions[-1][1][3] < OUT_H:
-                elements.append(Element("bg", whole, (0, 0, OUT_W, OUT_H), "blur"))
+        game_anchor = s.get("game_anchor") or "center"
         for role, dest, anchor in regions:
             if role == "game":
-                game(dest, anchor, whole)
+                game(dest, game_anchor if fit == "fit" else anchor, whole)
             elif role == "ui":
                 # Cut to its space's shape, like every other part: no blur round it.
                 ui = _clamp_box(s["ui_box"], src_w, src_h)

@@ -3,6 +3,14 @@
 // at `app.whenReady` (app is undefined). Strip it before launching dev mode.
 delete process.env.ELECTRON_RUN_AS_NODE
 
+const path = require('node:path')
+const venvScripts = path.resolve(__dirname, '..', '..', 'venv', 'Scripts')
+if (process.env.PATH) {
+  process.env.PATH = `${venvScripts};${process.env.PATH}`
+} else {
+  process.env.PATH = venvScripts
+}
+
 const { spawnSync } = require('node:child_process')
 const result = spawnSync('npx', ['electron-vite', 'dev'], {
   stdio: 'inherit',
@@ -10,3 +18,4 @@ const result = spawnSync('npx', ['electron-vite', 'dev'], {
   env: process.env
 })
 process.exit(result.status ?? 1)
+

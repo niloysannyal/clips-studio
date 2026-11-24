@@ -43,6 +43,7 @@ import { applyTextEdits, type WordEdit } from '../lib/captionEdits'
 import { PRESETS } from '../lib/gamingLayout'
 import { compactEdits, fixSpeakers, groupWords, paintTurns, tagLines } from '../lib/speakerTurns'
 import MultilingualExport from './MultilingualExport'
+import { TEMPLATES, type TemplatePreset } from '../lib/templates'
 import WatermarkControls, { DEFAULT_WATERMARK } from './WatermarkControls'
 import {
   Badge,
@@ -74,6 +75,7 @@ import { rememberYoutubeEnabled, youtubeEnabledSync, type YouTubeStatus } from '
 import type { Provider, UploadPostStatus } from '../lib/uploadpost'
 
 type Tab =
+  | 'layout'
   | 'captions'
   | 'subtitles'
   | 'audio'
@@ -84,6 +86,7 @@ type Tab =
   | 'youtube'
   | 'uploadpost'
 const TABS: { id: Tab; label: string; icon: JSX.Element }[] = [
+  { id: 'layout', label: 'Layout & Framing', icon: <span className="font-bold text-[11px] leading-none">📐</span> },
   { id: 'captions', label: 'Captions', icon: <span className="font-bold text-[11px] leading-none">Aa</span> },
   { id: 'subtitles', label: 'Subtitles', icon: <span className="font-bold text-[11px] leading-none">文</span> },
   { id: 'audio', label: 'Audio', icon: <Note /> },
@@ -226,16 +229,21 @@ export default function TimelineEditor({
   videoRef,
   onChanged,
   onPreview,
+  onReloadClip,
   onLiveOverlay,
   onTranslationPreview,
   watermark,
   setWatermark,
-  tabRequest
+  tabRequest,
+  onActiveTabChange,
+  isLandscape: propsIsLandscape,
+  setIsLandscape
 }: {
   clip: Clip
   videoRef: React.RefObject<HTMLVideoElement>
   onChanged: () => void
   onPreview: (url: string | null) => void
+  onReloadClip?: () => void
   onLiveOverlay: (o: LiveOverlay | null) => void
   /** Subtitles tab: draw a translated language over the editor video. */
   onTranslationPreview: (p: TranslationPreview | null) => void
@@ -245,6 +253,9 @@ export default function TimelineEditor({
    *  clicking the same button twice still re-opens it; activeTab lives here,
    *  and lifting it out just for one button would be a lot of plumbing. */
   tabRequest?: { tab: Tab; n: number }
+  onActiveTabChange?: (tab: string) => void
+  isLandscape?: boolean
+  setIsLandscape?: (l: boolean) => void
 }): JSX.Element {
   const duration = clip.end_s - clip.start_s
   const baked = useMemo<EditData | null>(() => clip.render_opts?.edit ?? null, [clip.id])
@@ -273,7 +284,7 @@ export default function TimelineEditor({
   // force the full frame on a blurred backdrop, Center = static center crop.
   const storedCrop = clip.render_opts?.crop ?? 'track'
   const [layout, setLayout] = useState<string>(storedCrop)
-  const isLandscape = !!clip.render_opts?.profile
+  const isLandscape = propsIsLandscape !== undefined ? propsIsLandscape : !!clip.render_opts?.profile
   // Vertical Live keeps the live's own 9:16 layout: there is no crop to
   // choose, so the Layout buttons would do nothing.
   const isVerticalLive = !!clip.render_opts?.vertical_live
@@ -287,6 +298,9 @@ export default function TimelineEditor({
   const storedStyle: Required<CaptionStyle> = {
     ...DEFAULT_CAPTION_STYLE,
     ...(clip.render_opts?.caption_style ?? {})
+  }
+  if (clip.render_opts?.gaming?.caption_y !== undefined) {
+    storedStyle.caption_y = clip.render_opts.gaming.caption_y
   }
   const [captionStyle, setCaptionStyle] = useState<Required<CaptionStyle>>(storedStyle)
   // Whether this clip burns captions: its own switch, else the choice of the
@@ -316,6 +330,53 @@ export default function TimelineEditor({
   const [tightening, setTightening] = useState(false)
   const [tightenNote, setTightenNote] = useState('')
 
+  const updatePreviewRef = useRef<((overrides?: {
+    gaming?: GamingSettings | null
+    captionStyle?: Required<CaptionStyle>
+    watermark?: WatermarkConfig | null
+    layout?: string
+    profile?: string | null
+    clearProfile?: boolean
+  }) => Promise<void>) | null>(null)
+
+  const applyTemplateToEditor = (tmpl: TemplatePreset): void => {
+    let nextGaming: GamingSettings | null = null
+    let nextLayout = layout
+    const isTargetLandscape = tmpl.renderOpts.profile === 'landscape' || tmpl.format === 'longform'
+    setIsLandscape?.(isTargetLandscape)
+    if (tmpl.renderOpts.gaming) {
+      nextGaming = {
+        ...(gaming ?? storedGaming ?? {}),
+        ...tmpl.renderOpts.gaming,
+        by: 'user'
+      }
+      setGaming(nextGaming)
+    } else if (isTargetLandscape) {
+      nextLayout = 'center'
+      setLayout('center')
+      setGaming(null)
+    }
+    const nextStyle = tmpl.renderOpts.caption_style
+      ? { ...captionStyle, ...tmpl.renderOpts.caption_style }
+      : captionStyle
+    if (tmpl.renderOpts.caption_style) {
+      setCaptionStyle(nextStyle)
+    }
+    const nextWm = tmpl.renderOpts.watermark !== undefined ? tmpl.renderOpts.watermark : watermark
+    if (tmpl.renderOpts.watermark !== undefined) {
+      setWatermark(nextWm)
+    }
+    setNotice(`⚡ Applied ${tmpl.name} — rendering instant preview…`)
+    updatePreviewRef.current?.({
+      gaming: nextGaming,
+      layout: nextLayout,
+      captionStyle: nextStyle,
+      watermark: nextWm,
+      profile: isTargetLandscape ? 'landscape' : null,
+      clearProfile: !isTargetLandscape
+    })
+  }
+
   // Leaving the Subtitles tab must take its preview off the video with it.
   // The panel unmounts on a tab switch, so its own cleanup can no longer
   // reach the editor — without this the translated captions stay painted
@@ -327,6 +388,9 @@ export default function TimelineEditor({
     if (activeTab !== 'subtitles') onTranslationPreview(null)
   }, [activeTab])
   useEffect(() => () => onTranslationPreview(null), [])
+  useEffect(() => {
+    onActiveTabChange?.(activeTab)
+  }, [activeTab, onActiveTabChange])
   // Watermark / branding for THIS clip — state lifted to EditorModal so the
   // live draggable overlay on the preview and these controls stay in sync.
   const storedWatermark = clip.render_opts?.watermark ?? null
@@ -550,7 +614,7 @@ export default function TimelineEditor({
   // Ctrl+scroll (and trackpad pinch) zooms around the cursor. Native
   // listener because React's root-level wheel handlers are passive —
   // preventDefault there can't stop the browser's page zoom.
-  const wheelZoom = useRef<(e: WheelEvent) => void>(() => {})
+  const wheelZoom = useRef<(e: WheelEvent) => void>(() => { })
   useEffect(() => {
     wheelZoom.current = (e: WheelEvent): void => {
       zoomTo(zoom * (e.deltaY < 0 ? 1.25 : 0.8), timeFromX(e.clientX))
@@ -958,30 +1022,47 @@ export default function TimelineEditor({
   // Clear the overlay when the editor unmounts (e.g. back to clips).
   useEffect(() => () => onLiveOverlay(null), [])
 
-  const updatePreview = async (): Promise<void> => {
+  const updatePreview = async (overrides?: {
+    gaming?: GamingSettings | null
+    captionStyle?: Required<CaptionStyle>
+    watermark?: WatermarkConfig | null
+    layout?: string
+    profile?: string | null
+    clearProfile?: boolean
+  }): Promise<void> => {
     setBusy(true)
-    setNotice('Rendering preview (real render — same framing as the export, up to a minute)…')
+    setNotice('Generating preview render…')
     try {
+      const g = overrides && 'gaming' in overrides ? overrides.gaming : (gamingDirty ? gaming : undefined)
+      const cs = overrides?.captionStyle ?? (styleDirty ? captionStyle : null)
+      const wm = overrides && 'watermark' in overrides ? (overrides.watermark ?? {}) : (wmDirty ? (watermark ?? {}) : undefined)
+      const lay = overrides?.layout ?? layout
+      const targetLandscape = overrides?.profile !== undefined ? overrides.profile === 'landscape' : isLandscape
+      const clearProf = overrides?.clearProfile ?? !targetLandscape
+      const prof = targetLandscape ? 'landscape' : null
       const res = await api.previewClip(
         clip.id,
         isDefault(edit, duration) ? null : edit,
         pendingCaptionLines(),
-        layout,
-        styleDirty ? captionStyle : null,
-        wmDirty ? (watermark ?? {}) : undefined,
-        gamingDirty ? gaming : undefined,
+        lay,
+        cs,
+        wm,
+        g ?? undefined,
         speakerDirty ? pendingSpeakerEdits() : undefined,
-        captionsDirty ? captionsOn : undefined
+        captionsDirty ? captionsOn : undefined,
+        clearProf,
+        prof
       )
       setDraftEditJson(pendingJson())
       onPreview(res.url)
-      setNotice('Preview loaded — this is exactly how the export will look')
+      setNotice('✓ Preview loaded — clip transformed with new layout!')
     } catch (e) {
-      setNotice(String(e))
+      setNotice(`Preview error: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(false)
     }
   }
+  updatePreviewRef.current = updatePreview
 
   const backToOriginal = (): void => {
     setDraftEditJson(null)
@@ -1069,13 +1150,23 @@ export default function TimelineEditor({
     if (layoutDirty) renderOpts.crop = layout
     // null turns the split off for this clip; settings turn it on or change it.
     if (gamingDirty) renderOpts.gaming = gaming
-    if (styleDirty) renderOpts.caption_style = captionStyle
+    const effectiveStyle = {
+      ...captionStyle,
+      ...(gaming?.caption_y !== undefined ? { caption_y: gaming.caption_y } : {})
+    }
+    if (styleDirty || gaming?.caption_y !== undefined) renderOpts.caption_style = effectiveStyle
     if (captionsDirty) renderOpts.captions = captionsOn
     if (wmDirty) renderOpts.watermark = watermark
     const lines = pendingCaptionLines()
     if (lines) renderOpts.caption_lines = lines
     // The whole list, always: an empty one means no fix is left.
     if (speakerDirty) renderOpts.speaker_edits = pendingSpeakerEdits()
+    if (isLandscape) {
+      renderOpts.profile = 'landscape'
+    } else {
+      renderOpts.profile = null
+      renderOpts.clear_profile = true
+    }
     return renderOpts
   }
 
@@ -1521,11 +1612,10 @@ export default function TimelineEditor({
             {keep.map(([a, b], i) => (
               <div
                 key={i}
-                className={`absolute top-4 bottom-0 rounded-sm pointer-events-none ${
-                  i === playheadSeg && keep.length > 1
-                    ? 'bg-accent/60 ring-1 ring-accent'
-                    : 'bg-accent/25'
-                }`}
+                className={`absolute top-4 bottom-0 rounded-sm pointer-events-none ${i === playheadSeg && keep.length > 1
+                  ? 'bg-accent/60 ring-1 ring-accent'
+                  : 'bg-accent/25'
+                  }`}
                 style={{ left: pct(a), width: pct(b - a) }}
               />
             ))}
@@ -1565,9 +1655,8 @@ export default function TimelineEditor({
               <div className="absolute inset-y-0 -left-px w-0.5 bg-white shadow" />
               <div className="absolute top-0 -left-1.5 w-3 h-3 rounded-full bg-white shadow ring-1 ring-black/30" />
               <span
-                className={`absolute top-0 text-[10px] tabular-nums bg-black/70 text-white px-1 py-0.5 rounded whitespace-nowrap ${
-                  playhead / Math.max(duration, 0.1) > 0.85 ? 'right-2.5' : 'left-2.5'
-                }`}
+                className={`absolute top-0 text-[10px] tabular-nums bg-black/70 text-white px-1 py-0.5 rounded whitespace-nowrap ${playhead / Math.max(duration, 0.1) > 0.85 ? 'right-2.5' : 'left-2.5'
+                  }`}
               >
                 {fmt(playhead)}
               </span>
@@ -1627,25 +1716,58 @@ export default function TimelineEditor({
         </span>
       </div>
 
+      {/* ── Quick Viral Templates Switcher ── */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-accent/5 border border-accent/20 rounded-lg text-xs flex-wrap">
+        <span className="font-bold text-accent uppercase tracking-wider text-[11px] flex items-center gap-1">
+          ⚡ 1-Click Viral Templates:
+        </span>
+        <div className="flex gap-1.5 flex-wrap">
+          {TEMPLATES.map((tmpl) => (
+            <button
+              key={tmpl.id}
+              type="button"
+              onClick={() => applyTemplateToEditor(tmpl)}
+              className="px-2.5 py-1 rounded bg-raised hover:bg-accent/20 hover:text-accent border border-raised/60 text-ink text-xs transition-colors flex items-center gap-1"
+              title={tmpl.description}
+            >
+              <span>{tmpl.name}</span>
+              <span className="text-[10px] text-muted">({tmpl.format === 'shorts' ? '9:16' : '16:9'})</span>
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setActiveTab('layout')
+            setGaming(gaming ?? storedGaming ?? { by: 'clip', preset: 'split', divider: 0.32 })
+            setGamingOpen(true)
+          }}
+          className="px-2.5 py-1 rounded bg-accent/20 text-accent hover:bg-accent/30 border border-accent/40 text-xs font-medium ml-auto flex items-center gap-1 cursor-pointer transition-colors"
+          title="Open visual facecam & game layout editor"
+        >
+          <span>📐 Customize Layout & Cam…</span>
+        </button>
+      </div>
+
       {/* ── editing tabs (grouped, CapCut-style) ── */}
       <div className="flex gap-0.5 border-b border-raised/60 text-xs overflow-x-auto" role="tablist">
         {tabs.map((t) => {
           const changed =
+            (t.id === 'layout' && (layoutDirty || gamingDirty)) ||
             (t.id === 'captions' && (styleDirty || captionsDirty || wordEdits.length > 0 || speakerDirty)) ||
             (t.id === 'watermark' && wmDirty) ||
             (t.id === 'motion' &&
-              ((edit.speed ?? 1) !== 1 || !!edit.hook || !!edit.music || layoutDirty || gamingDirty))
+              ((edit.speed ?? 1) !== 1 || !!edit.hook || !!edit.music))
           return (
             <button
               key={t.id}
               role="tab"
               aria-selected={activeTab === t.id}
               onClick={() => setActiveTab(t.id)}
-              className={`px-3 py-1.5 -mb-px border-b-2 whitespace-nowrap ${
-                activeTab === t.id
-                  ? 'border-accent text-accent font-medium'
-                  : 'border-transparent text-muted hover:text-ink'
-              }`}
+              className={`px-3 py-1.5 -mb-px border-b-2 whitespace-nowrap ${activeTab === t.id
+                ? 'border-accent text-accent font-medium'
+                : 'border-transparent text-muted hover:text-ink'
+                }`}
             >
               <span aria-hidden>{t.icon}</span> {t.label}
               {changed && <span className="text-accent"> •</span>}
@@ -1663,9 +1785,8 @@ export default function TimelineEditor({
                 setWordMode(mode === 'text' ? 'mute' : 'text')
                 setEditingWord(null)
               }}
-              className={`text-xs px-2.5 py-1 rounded-md ${
-                mode === 'text' ? 'bg-accent/20 text-accent font-medium' : 'bg-raised text-muted hover:text-ink'
-              }`}
+              className={`text-xs px-2.5 py-1 rounded-md ${mode === 'text' ? 'bg-accent/20 text-accent font-medium' : 'bg-raised text-muted hover:text-ink'
+                }`}
               title={t("Fix words the transcription got wrong — the burned caption text updates on Apply")}
             >
               <Pencil className="mr-1.5" />
@@ -1680,11 +1801,10 @@ export default function TimelineEditor({
                   setEditingWord(null)
                   lastSpeakerWord.current = null
                 }}
-                className={`text-xs px-2.5 py-1 rounded-md disabled:opacity-50 disabled:cursor-not-allowed ${
-                  mode === 'speaker'
-                    ? 'bg-accent/20 text-accent font-medium'
-                    : 'bg-raised text-muted hover:text-ink'
-                }`}
+                className={`text-xs px-2.5 py-1 rounded-md disabled:opacity-50 disabled:cursor-not-allowed ${mode === 'speaker'
+                  ? 'bg-accent/20 text-accent font-medium'
+                  : 'bg-raised text-muted hover:text-ink'
+                  }`}
                 title={
                   canFixSpeakers
                     ? 'Put right who is talking: switch words to the other speaker’s colour, or back'
@@ -1726,9 +1846,8 @@ export default function TimelineEditor({
             </span>
           </div>
           <div
-            className={`max-h-28 overflow-y-auto bg-base rounded-md p-2 leading-6 ${
-              mode === 'speaker' ? 'select-none' : ''
-            }`}
+            className={`max-h-28 overflow-y-auto bg-base rounded-md p-2 leading-6 ${mode === 'speaker' ? 'select-none' : ''
+              }`}
           >
             {words.map((w, i) => {
               if (editingWord?.i === i) {
@@ -1773,15 +1892,14 @@ export default function TimelineEditor({
                         ? openWordBox(i, corrected?.to ?? w.word)
                         : toggleWord(w)
                   }
-                  className={`text-xs mr-1 rounded px-0.5 ${
-                    muted
-                      ? 'line-through text-red-400 bg-red-500/10'
-                      : corrected
-                        ? 'text-accent bg-accent/10'
-                        : inRemoved
-                          ? 'text-muted/40 line-through'
-                          : 'text-muted hover:text-ink hover:bg-raised'
-                  }`}
+                  className={`text-xs mr-1 rounded px-0.5 ${muted
+                    ? 'line-through text-red-400 bg-red-500/10'
+                    : corrected
+                      ? 'text-accent bg-accent/10'
+                      : inRemoved
+                        ? 'text-muted/40 line-through'
+                        : 'text-muted hover:text-ink hover:bg-raised'
+                    }`}
                   // A bar under the other speaker's words, in their caption
                   // colour. Not an underline: muted and cut words are struck
                   // through, and the two are one CSS property.
@@ -1885,132 +2003,248 @@ export default function TimelineEditor({
       {/* audio controls */}
       {activeTab === 'audio' && (
         <div className="flex items-center gap-3 flex-wrap text-xs">
-        {/* Proposes cuts into the normal edit list, so they are drawn on the
+          {/* Proposes cuts into the normal edit list, so they are drawn on the
             timeline and can be adjusted or undone before anything renders. */}
-        <button
-          className="btn-ghost !py-1 text-xs"
-          disabled={tightening}
-          title={t("Find pauses and filler words (um, uh) and cut them. The cuts appear on the timeline for you to check — nothing renders until you Apply.")}
-          onClick={async () => {
-            setTightening(true)
-            setTightenNote('')
-            try {
-              const r = await api.tightenClip(clip.id)
-              if (r.cuts === 0) {
-                setTightenNote('Nothing to trim — no dead air or filler found.')
-              } else {
-                push({ ...edit, keep: r.keep })
-                setTightenNote(
-                  `${r.cuts} cut(s), ${r.removed_seconds.toFixed(1)}s removed → ${r.new_duration.toFixed(1)}s. Undo if it took too much.`
-                )
+          <button
+            className="btn-ghost !py-1 text-xs"
+            disabled={tightening}
+            title={t("Find pauses and filler words (um, uh) and cut them. The cuts appear on the timeline for you to check — nothing renders until you Apply.")}
+            onClick={async () => {
+              setTightening(true)
+              setTightenNote('')
+              try {
+                const r = await api.tightenClip(clip.id)
+                if (r.cuts === 0) {
+                  setTightenNote('Nothing to trim — no dead air or filler found.')
+                } else {
+                  push({ ...edit, keep: r.keep })
+                  setTightenNote(
+                    `${r.cuts} cut(s), ${r.removed_seconds.toFixed(1)}s removed → ${r.new_duration.toFixed(1)}s. Undo if it took too much.`
+                  )
+                }
+              } catch (err) {
+                setTightenNote(`Error: ${err instanceof Error ? err.message : String(err)}`)
+              } finally {
+                setTightening(false)
               }
-            } catch (err) {
-              setTightenNote(`Error: ${err instanceof Error ? err.message : String(err)}`)
-            } finally {
-              setTightening(false)
-            }
-          }}
-        >
-          {tightening ? 'Finding…' : 'Trim pauses & filler'}
-        </button>
-        {tightenNote && <span className="text-muted">{tightenNote}</span>}
-        <label
-          className="flex items-center gap-1.5 cursor-pointer"
-          title={t("Remove ALL of the clip's audio — e.g. to post it with background music only")}
-        >
-          <input
-            type="checkbox"
-            checked={edit.mute_all}
-            onChange={(e) => push({ ...edit, mute_all: e.target.checked })}
-          />
-          Mute all
-        </label>
-        <label className="flex items-center gap-1.5">
-          Volume
-          <input
-            type="range"
-            min={0}
-            max={200}
-            value={Math.round(edit.volume * 100)}
-            disabled={edit.mute_all}
-            className="w-24 accent-[#38BDF8]"
-            onChange={(e) => setEdit({ ...edit, volume: Number(e.target.value) / 100 })}
-            onMouseUp={() => setHistory((h) => [...h.slice(-30), { edit }])}
-          />
-          <span className="tabular-nums w-8">{Math.round(edit.volume * 100)}%</span>
-        </label>
-        {(['fade_in', 'fade_out'] as const).map((k) => (
-          <label key={k} className="flex items-center gap-1.5">
-            {k === 'fade_in' ? 'Fade in' : 'Fade out'}
-            <select
-              value={edit[k]}
-              onChange={(e) => push({ ...edit, [k]: Number(e.target.value) })}
-              className="bg-base border border-raised rounded px-1 py-0.5"
-            >
-              <option value={0}>off</option>
-              <option value={0.3}>0.3s</option>
-              <option value={0.5}>0.5s</option>
-              <option value={1}>1s</option>
-            </select>
+            }}
+          >
+            {tightening ? 'Finding…' : 'Trim pauses & filler'}
+          </button>
+          {tightenNote && <span className="text-muted">{tightenNote}</span>}
+          <label
+            className="flex items-center gap-1.5 cursor-pointer"
+            title={t("Remove ALL of the clip's audio — e.g. to post it with background music only")}
+          >
+            <input
+              type="checkbox"
+              checked={edit.mute_all}
+              onChange={(e) => push({ ...edit, mute_all: e.target.checked })}
+            />
+            Mute all
           </label>
-        ))}
+          <label className="flex items-center gap-1.5">
+            Volume
+            <input
+              type="range"
+              min={0}
+              max={200}
+              value={Math.round(edit.volume * 100)}
+              disabled={edit.mute_all}
+              className="w-24 accent-[#38BDF8]"
+              onChange={(e) => setEdit({ ...edit, volume: Number(e.target.value) / 100 })}
+              onMouseUp={() => setHistory((h) => [...h.slice(-30), { edit }])}
+            />
+            <span className="tabular-nums w-8">{Math.round(edit.volume * 100)}%</span>
+          </label>
+          {(['fade_in', 'fade_out'] as const).map((k) => (
+            <label key={k} className="flex items-center gap-1.5">
+              {k === 'fade_in' ? 'Fade in' : 'Fade out'}
+              <select
+                value={edit[k]}
+                onChange={(e) => push({ ...edit, [k]: Number(e.target.value) })}
+                className="bg-base border border-raised rounded px-1 py-0.5"
+              >
+                <option value={0}>off</option>
+                <option value={0.3}>0.3s</option>
+                <option value={0.5}>0.5s</option>
+                <option value={1}>1s</option>
+              </select>
+            </label>
+          ))}
         </div>
       )}
 
-      {/* layout override (vertical Shorts only) — in the Effects tab */}
-      {activeTab === 'motion' && !isLandscape && isVerticalLive && (
-        <p className="text-xs text-muted">Layout: Vertical Live keeps the stream’s own 9:16 layout.</p>
-      )}
-      {activeTab === 'motion' && !isLandscape && !isVerticalLive && (
-        <div className="flex items-center gap-2 text-xs flex-wrap">
-          <span className="text-muted">Layout</span>
-          {(
-            [
-              ['track', 'Auto (AI)', 'The AI picks: subject tracking or letterbox as needed'],
-              ['letterbox', 'Letterbox', 'Force the FULL frame on a blurred backdrop — use when the crop cuts someone off'],
-              ['center', 'Center', 'Static center crop, no tracking'],
-              [
-                'split',
-                'Gaming / Reaction',
-                'A gaming or reaction layout: the streamer’s webcam with the game or the video they’re reacting to (Split, Half, Small facecam and more)'
-              ]
-            ] as const
-          ).map(([value, label, tip]) => (
-            <button
-              key={value}
-              onClick={() => {
-                if (value === 'split') {
-                  // Back to what the clip had, else found in this clip alone.
-                  setGaming(gaming ?? storedGaming ?? { by: 'clip', preset: 'split' })
-                } else {
-                  setLayout(value)
-                  setGaming(null)
-                }
-              }}
-              className={`px-2.5 py-1 rounded-md ${
-                (gaming ? 'split' : layout) === value
-                  ? 'bg-accent/20 text-accent font-medium'
-                  : 'bg-raised text-muted hover:text-ink'
-              }`}
-              title={tip}
-            >
-              {label}
-            </button>
-          ))}
-          {(layoutDirty || gamingDirty) && (
-            <span className="text-muted">— shows in “Update preview”, saved on Apply</span>
+      {/* layout & framing tab */}
+      {activeTab === 'layout' && (
+        <div className="border border-raised/60 rounded-lg p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-accent flex items-center gap-1.5">
+              <span>📐</span> Layout & Split-Screen Framing
+            </span>
+            {gaming && (
+              <button
+                type="button"
+                className="btn-accent !py-1 !px-2.5 text-xs font-semibold flex items-center gap-1"
+                onClick={() => setGamingOpen(true)}
+              >
+                <span>📐 Open Visual Box Editor…</span>
+              </button>
+            )}
+          </div>
+
+          {/* Format selector: 9:16 Shorts vs 16:9 Longform */}
+          <div className="flex items-center gap-2 pb-2 border-b border-raised/60">
+            <span className="text-muted text-xs font-medium">Format:</span>
+            {[
+              ['shorts', '📱 Shorts (9:16)'],
+              ['longform', '▭ Longform (16:9)']
+            ].map(([fKey, fLabel]) => {
+              const isSelected = (isLandscape ? 'longform' : 'shorts') === fKey
+              return (
+                <button
+                  key={fKey}
+                  type="button"
+                  onClick={() => {
+                    const nextLandscape = fKey === 'longform'
+                    setIsLandscape?.(nextLandscape)
+                    if (nextLandscape) {
+                      setLayout('center')
+                      setGaming(null)
+                      updatePreviewRef.current?.({ layout: 'center', gaming: null, profile: 'landscape', clearProfile: false })
+                    } else {
+                      const nextG = gaming ?? storedGaming ?? { by: 'clip', preset: 'split', divider: 0.32, game_fit: 'fit', game_anchor: 'center' }
+                      setGaming(nextG)
+                      updatePreviewRef.current?.({ gaming: nextG, profile: null, clearProfile: true })
+                    }
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-medium transition-colors ${isSelected
+                    ? 'bg-accent text-white font-semibold shadow-sm'
+                    : 'bg-raised text-muted hover:text-ink'
+                    }`}
+                >
+                  {fLabel}
+                </button>
+              )
+            })}
+          </div>
+
+          {isLandscape && (
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-muted">Mode:</span>
+                {[
+                  ['center', 'Center', 'Standard 16:9 horizontal stream'],
+                  ['letterbox', 'Letterbox Blur', 'Framed on blurred ambient backdrop']
+                ].map(([val, lab, tip]) => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => {
+                      setLayout(val)
+                      setGaming(null)
+                      updatePreviewRef.current?.({ layout: val, gaming: null, profile: 'landscape' })
+                    }}
+                    className={`px-3 py-1.5 rounded-md ${layout === val
+                      ? 'bg-accent/20 text-accent font-semibold border border-accent/40'
+                      : 'bg-raised text-muted hover:text-ink'
+                      }`}
+                    title={tip}
+                  >
+                    {lab}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted">
+                Widescreen 1920×1080 horizontal clip for YouTube and standard video players.
+              </p>
+            </div>
+          )}
+
+          {!isLandscape && isVerticalLive && (
+            <p className="text-xs text-muted">Layout: Vertical Live keeps the stream’s native 9:16 layout.</p>
+          )}
+
+          {!isLandscape && !isVerticalLive && (
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-muted">Mode:</span>
+                {(
+                  [
+                    ['split', 'Gaming / Reaction', 'Webcam and game split or layered together (70/30, PiP, etc.)'],
+                    ['track', 'Auto (AI)', 'Subject tracking or letterbox picked automatically'],
+                    ['letterbox', 'Letterbox', 'Full frame on blurred backdrop'],
+                    ['center', 'Center', 'Static center crop, no tracking']
+                  ] as const
+                ).map(([value, label, tip]) => (
+                  <button
+                    key={value}
+                    onClick={() => {
+                      if (value === 'split') {
+                        setGaming(gaming ?? storedGaming ?? { by: 'clip', preset: 'split', divider: 0.32 })
+                      } else {
+                        setLayout(value)
+                        setGaming(null)
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-md ${(gaming ? 'split' : layout) === value
+                      ? 'bg-accent/20 text-accent font-semibold border border-accent/40'
+                      : 'bg-raised text-muted hover:text-ink'
+                      }`}
+                    title={tip}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {gaming && (
+                <div className="bg-base/60 rounded-lg p-2.5 border border-raised/60 space-y-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-muted font-medium">Quick Presets:</span>
+                    {[
+                      ['split', 'Viral Split 70/30', { divider: 0.32, order: 'cam_top' as const, game_fit: 'fill' as const }],
+                      ['circle_cam', 'Reaction PiP (Circle)', { game_fit: 'fill' as const }],
+                      ['fullscreen', 'Full Gameplay', { game_fit: 'fill' as const }],
+                      ['half', 'Half & Half (50/50)', { divider: 0.5, order: 'cam_top' as const }],
+                      ['small_cam', 'Small Cam Corner', { game_fit: 'fill' as const }]
+                    ].map(([pId, pLabel, pOpts]) => (
+                      <button
+                        key={pId as string}
+                        type="button"
+                        onClick={() => {
+                          const updated = { ...gaming, preset: pId as string, ...(pOpts as object) }
+                          setGaming(updated)
+                          void api.patchClip(clip.id, { render_opts: { gaming: updated } }).catch(() => undefined)
+                          setNotice(`Switched layout to ${pLabel}`)
+                        }}
+                        className={`px-2.5 py-1 rounded text-xs ${gaming.preset === pId
+                          ? 'bg-accent text-white font-medium shadow-sm'
+                          : 'bg-raised text-ink hover:bg-raised/70'
+                          }`}
+                      >
+                        {pLabel as string}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs pt-1 text-muted">
+                    <span>{describeSplit(gaming, gamingDirty)}</span>
+                    <button
+                      type="button"
+                      className="text-xs text-accent hover:underline flex items-center gap-1 font-medium"
+                      onClick={() => setGamingOpen(true)}
+                    >
+                      <span>Adjust webcam/game boundaries</span> ↗
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
-      {activeTab === 'motion' && !isLandscape && !isVerticalLive && gaming && (
-        <div className="flex items-center gap-2 text-xs flex-wrap">
-          <span className="text-muted">{describeSplit(gaming, gamingDirty)}</span>
-          <button className="btn-ghost !py-1" onClick={() => setGamingOpen(true)}>
-            Change layout…
-          </button>
-          {rememberGaming && <span className="text-accent">Will be remembered for this creator</span>}
-        </div>
-      )}
+
       {gamingOpen && gaming && (
         <GamingLayoutEditor
           source={{ clipId: clip.id }}
@@ -2018,9 +2252,46 @@ export default function TimelineEditor({
           settings={gaming}
           remember={rememberGaming}
           onClose={() => setGamingOpen(false)}
-          onDone={(next, remember) => {
+          onDone={async (next, remember) => {
             setGaming(next)
             setRememberGaming(remember)
+            const nextStyle = next.caption_y !== undefined ? { ...captionStyle, caption_y: next.caption_y } : captionStyle
+            if (next.caption_y !== undefined) setCaptionStyle(nextStyle)
+            try {
+              await api.patchClip(clip.id, {
+                render_opts: {
+                  gaming: next,
+                  ...(next.caption_y !== undefined ? { caption_style: nextStyle } : {})
+                }
+              })
+              setNotice('✓ Saved layout to clip — updating preview…')
+              onChanged()
+              updatePreview({ gaming: next, captionStyle: nextStyle })
+            } catch (e) {
+              console.warn('Could not patch clip layout:', e)
+            }
+          }}
+          onSaveAndRerender={async (next, remember) => {
+            setGaming(next)
+            setRememberGaming(remember)
+            const nextStyle = next.caption_y !== undefined ? { ...captionStyle, caption_y: next.caption_y } : captionStyle
+            if (next.caption_y !== undefined) setCaptionStyle(nextStyle)
+            setNotice('⚡ Re-rendering clip with new layout on GPU…')
+            try {
+              const currentOpts = buildRenderOpts()
+              const res = await api.rerenderClip(
+                clip.id,
+                undefined,
+                { ...currentOpts, gaming: next, ...(next.caption_y !== undefined ? { caption_style: nextStyle } : {}) },
+                usedSuggestions()
+              )
+              setNotice(`⚡ Re-render queued (Job #${res.job_id}) — updating preview!`)
+              onChanged()
+              onReloadClip?.()
+              updatePreview({ gaming: next, captionStyle: nextStyle })
+            } catch (e) {
+              setNotice(`Error: ${e instanceof Error ? e.message : String(e)}`)
+            }
           }}
         />
       )}
@@ -2028,121 +2299,121 @@ export default function TimelineEditor({
       {/* speed / hook title / music — the Effects tab */}
       {activeTab === 'motion' && (
         <div className="space-y-2 text-xs">
-        <div className="flex items-center gap-3 flex-wrap">
-          <label className="flex items-center gap-1.5">
-            Speed
-            <select
-              value={edit.speed ?? 1}
-              onChange={(e) => push({ ...edit, speed: Number(e.target.value) })}
-              className="bg-base border border-raised rounded px-1 py-0.5"
-            >
-              {[0.75, 1, 1.25, 1.5, 2].map((s) => (
-                <option key={s} value={s}>
-                  {s}x
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex items-center gap-1.5 flex-1 min-w-48">
-            Hook title
-            <input
-              value={edit.hook?.text ?? ''}
-              placeholder={t("big top text for the first seconds, e.g. WAIT FOR IT…")}
-              className="flex-1 bg-base border border-raised rounded px-2 py-1"
-              onChange={(e) =>
-                setEdit({
-                  ...edit,
-                  hook: e.target.value.trim()
-                    ? { text: e.target.value, seconds: edit.hook?.seconds ?? 3 }
-                    : null
-                })
-              }
-              onBlur={() => setHistory((h) => [...h.slice(-30), { edit }])}
-            />
-          </label>
-          {edit.hook && (
-            <select
-              value={edit.hook.seconds}
-              onChange={(e) => push({ ...edit, hook: { ...edit.hook!, seconds: Number(e.target.value) } })}
-              className="bg-base border border-raised rounded px-1 py-0.5"
-              aria-label={t("How long the hook title stays on screen")}
-            >
-              {[2, 3, 5, 8].map((s) => (
-                <option key={s} value={s}>
-                  {s}s
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <label className="flex items-center gap-1.5 flex-1 min-w-56">
-            Music
-            <input
-              value={edit.music?.path ?? ''}
-              placeholder={t("background music — loops under the clip")}
-              className="flex-1 bg-base border border-raised rounded px-2 py-1"
-              onChange={(e) =>
-                setEdit({
-                  ...edit,
-                  music: e.target.value.trim()
-                    ? {
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-1.5">
+              Speed
+              <select
+                value={edit.speed ?? 1}
+                onChange={(e) => push({ ...edit, speed: Number(e.target.value) })}
+                className="bg-base border border-raised rounded px-1 py-0.5"
+              >
+                {[0.75, 1, 1.25, 1.5, 2].map((s) => (
+                  <option key={s} value={s}>
+                    {s}x
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 flex-1 min-w-48">
+              Hook title
+              <input
+                value={edit.hook?.text ?? ''}
+                placeholder={t("big top text for the first seconds, e.g. WAIT FOR IT…")}
+                className="flex-1 bg-base border border-raised rounded px-2 py-1"
+                onChange={(e) =>
+                  setEdit({
+                    ...edit,
+                    hook: e.target.value.trim()
+                      ? { text: e.target.value, seconds: edit.hook?.seconds ?? 3 }
+                      : null
+                  })
+                }
+                onBlur={() => setHistory((h) => [...h.slice(-30), { edit }])}
+              />
+            </label>
+            {edit.hook && (
+              <select
+                value={edit.hook.seconds}
+                onChange={(e) => push({ ...edit, hook: { ...edit.hook!, seconds: Number(e.target.value) } })}
+                className="bg-base border border-raised rounded px-1 py-0.5"
+                aria-label={t("How long the hook title stays on screen")}
+              >
+                {[2, 3, 5, 8].map((s) => (
+                  <option key={s} value={s}>
+                    {s}s
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-1.5 flex-1 min-w-56">
+              Music
+              <input
+                value={edit.music?.path ?? ''}
+                placeholder={t("background music — loops under the clip")}
+                className="flex-1 bg-base border border-raised rounded px-2 py-1"
+                onChange={(e) =>
+                  setEdit({
+                    ...edit,
+                    music: e.target.value.trim()
+                      ? {
                         path: e.target.value,
                         volume: edit.music?.volume ?? 0.25,
                         duck: edit.music?.duck ?? true
                       }
-                    : null
-                })
-              }
-              onBlur={() => setHistory((h) => [...h.slice(-30), { edit }])}
-            />
-          </label>
-          <button
-            className="bg-raised px-2.5 py-1 rounded-md hover:bg-raised/70"
-            onClick={async () => {
-              const path = await window.studio.pickAudioFile()
-              if (path) {
-                push({
-                  ...edit,
-                  music: {
-                    path,
-                    volume: edit.music?.volume ?? 0.25,
-                    duck: edit.music?.duck ?? true
-                  }
-                })
-              }
-            }}
-            title={t("Choose a music file from your computer")}
-          >
-            <Folder className="mr-1.5" />
-            Browse…
-          </button>
-          {edit.music && (
-            <>
-              <label className="flex items-center gap-1.5">
-                Vol
-                <input
-                  type="range"
-                  min={5}
-                  max={100}
-                  value={Math.round(edit.music.volume * 100)}
-                  className="w-20 accent-[#38BDF8]"
-                  onChange={(e) =>
-                    setEdit({ ...edit, music: { ...edit.music!, volume: Number(e.target.value) / 100 } })
-                  }
-                />
-              </label>
-              <label className="flex items-center gap-1.5 cursor-pointer" title={t("Music automatically dips whenever the creator talks")}>
-                <input
-                  type="checkbox"
-                  checked={edit.music.duck}
-                  onChange={(e) => push({ ...edit, music: { ...edit.music!, duck: e.target.checked } })}
-                />
-                Duck under voice
-              </label>
-            </>
-          )}
-        </div>
+                      : null
+                  })
+                }
+                onBlur={() => setHistory((h) => [...h.slice(-30), { edit }])}
+              />
+            </label>
+            <button
+              className="bg-raised px-2.5 py-1 rounded-md hover:bg-raised/70"
+              onClick={async () => {
+                const path = await window.studio.pickAudioFile()
+                if (path) {
+                  push({
+                    ...edit,
+                    music: {
+                      path,
+                      volume: edit.music?.volume ?? 0.25,
+                      duck: edit.music?.duck ?? true
+                    }
+                  })
+                }
+              }}
+              title={t("Choose a music file from your computer")}
+            >
+              <Folder className="mr-1.5" />
+              Browse…
+            </button>
+            {edit.music && (
+              <>
+                <label className="flex items-center gap-1.5">
+                  Vol
+                  <input
+                    type="range"
+                    min={5}
+                    max={100}
+                    value={Math.round(edit.music.volume * 100)}
+                    className="w-20 accent-[#38BDF8]"
+                    onChange={(e) =>
+                      setEdit({ ...edit, music: { ...edit.music!, volume: Number(e.target.value) / 100 } })
+                    }
+                  />
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer" title={t("Music automatically dips whenever the creator talks")}>
+                  <input
+                    type="checkbox"
+                    checked={edit.music.duck}
+                    onChange={(e) => push({ ...edit, music: { ...edit.music!, duck: e.target.checked } })}
+                  />
+                  Duck under voice
+                </label>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -2203,7 +2474,7 @@ export default function TimelineEditor({
         <button
           className="bg-raised px-3 py-1.5 rounded-md text-xs font-medium hover:bg-raised/70 disabled:opacity-40"
           disabled={busy}
-          onClick={updatePreview}
+          onClick={() => updatePreview()}
           title={t("Renders the clip for real with ALL pending changes — same framing/zoom, tracking, captions, hook, music and speed as the final export. Can take up to a minute.")}
         >
           {busy ? (

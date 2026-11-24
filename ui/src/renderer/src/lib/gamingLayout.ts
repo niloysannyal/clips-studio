@@ -60,6 +60,7 @@ export interface LayoutSettings {
   safe?: string
   game_fit?: string
   game_align?: string
+  game_anchor?: 'top' | 'center' | 'bottom'
   cam?: FrameBox | null
   cam2?: FrameBox | null
   game_box?: FrameBox | null
@@ -68,6 +69,7 @@ export interface LayoutSettings {
   /** Where the user put the facecams and the Game UI on the Short (fractions of it). */
   places?: Partial<Record<Placeable, FrameBox>>
   cam_position?: string
+  caption_y?: number
 }
 
 type Spec = {
@@ -473,19 +475,16 @@ export function plan(
       camera(role as Role, dest, (spec.shape ?? 'rect') as Element['shape'])
     }
   } else {
-    let regions = stackRegions(spec, order, s.divider)
+    const regions = stackRegions(spec, order, s.divider)
     let wholeGame: PxBox | null = null
     if (fit === 'fit') {
-      // The whole game right against the webcam; blur above and below the two.
       const space = (regions.find(([role]) => role === 'game') as [string, PxBox, Element['anchor']])[1]
       wholeGame = gameSrc(srcW, srcH, s, space[2] / space[3], fit, shownCams, panels)
-      regions = stackRegions(spec, order, s.divider, (OUT_W * wholeGame[3]) / wholeGame[2], safe.top)
-      const last = regions[regions.length - 1][1]
-      if (regions[0][1][1] > 0 || last[1] + last[3] < OUT_H)
-        elements.push({ role: 'bg', src: wholeGame, dest: [0, 0, OUT_W, OUT_H], fit: 'blur', anchor: 'center', shift: 0, shape: 'rect' })
     }
+    const gameAnchor: Element['anchor'] =
+      (s.game_anchor as Element['anchor']) ?? 'center'
     for (const [role, dest, anchor] of regions) {
-      if (role === 'game') game(dest, anchor, wholeGame)
+      if (role === 'game') game(dest, fit === 'fit' ? gameAnchor : anchor, wholeGame)
       else if (role === 'ui') {
         // Cut to its space's shape, like every other part: no blur round it.
         const ui = clampBox(s.ui_box as FrameBox, srcW, srcH)

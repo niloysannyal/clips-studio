@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
-import type { QueueJob, QueueSnapshot, StudioEvent } from '../lib/types'
+import type { Clip, QueueJob, QueueSnapshot, StudioEvent } from '../lib/types'
 import { applyEvent, progressStore } from '../lib/jobProgress'
-import { formatQueueEta, queueEta, remainingCount } from '../lib/queue'
+import { formatQueueEta, queueCounts, queueEta, remainingCount } from '../lib/queue'
 import { useEvents } from '../lib/useEvents'
 import AddVideos from '../components/queue/AddVideos'
 import QueueItem from '../components/queue/QueueItem'
@@ -33,7 +33,38 @@ export default function Queue({
   // read the same fraction rather than each folding events their own way.
   const [live, setLive] = useState(progressStore.current)
   const [now, setNow] = useState(Date.now())
+  const [clipMap, setClipMap] = useState<Map<number, Clip>>(new Map())
   const inFlight = useRef(false)
+
+  // Fetch clip info so render jobs show their exact clip title and duration
+  useEffect(() => {
+    let active = true
+    const loadClips = async (): Promise<void> => {
+      try {
+        const videos = await api.videos()
+        const newMap = new Map<number, Clip>()
+        await Promise.all(
+          videos.map(async (v) => {
+            try {
+              const clips = await api.clips(v.video_id)
+              for (const c of clips) {
+                newMap.set(c.id, c)
+              }
+            } catch {
+              // ignore
+            }
+          })
+        )
+        if (active) setClipMap(newMap)
+      } catch {
+        // ignore
+      }
+    }
+    void loadClips()
+    return () => {
+      active = false
+    }
+  }, [snapshot])
 
   const refresh = useCallback(async (): Promise<void> => {
     if (inFlight.current) return
@@ -90,6 +121,9 @@ export default function Queue({
   const remaining = remainingCount(snapshot)
   const eta = queueEta(snapshot, live, now)
   const confident = snapshot?.estimate.confident ?? false
+  const counts = queueCounts(snapshot)
+  const renderBatch = counts.renders > 0
+  const completedRenders = snapshot?.completed.filter((j) => j.type === 'render').length ?? 0
 
   /** Clearing removes rows permanently, and a full history can be a hundred
    *  of them, so it asks first. Two-step inline rather than window.confirm —
@@ -157,6 +191,7 @@ export default function Queue({
                 total={jobs.length}
                 live={job.status === 'running' ? live : undefined}
                 now={now}
+                clipMap={clipMap}
                 onChanged={refresh}
                 onOpenInStudio={onOpenInStudio}
               />
@@ -186,13 +221,21 @@ export default function Queue({
       {remaining > 0 && (
         <div className="card flex items-center gap-4 flex-wrap">
           <div className="min-w-0">
-            <p className="text-lg font-semibold tabular-nums">
-              {remaining} {remaining === 1 ? t('video remaining') : t('videos remaining')}
-            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-lg font-semibold tabular-nums">
+                {counts.summary}
+              </p>
+              {renderBatch && completedRenders > 0 && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-accent/15 text-accent font-medium">
+                  {completedRenders} clips completed
+                </span>
+              )}
+            </div>
             {eta !== null && (
               <p className="text-sm text-muted">
                 {confident ? t('About') : t('Roughly')} {formatQueueEta(eta)} {t('to go')}
-                {!confident && ` · ${t('the estimate sharpens after a few videos')}`}
+                {renderBatch && ' · ~1m 23s per clip'}
+                {!confident && !renderBatch && ` · ${t('the estimate sharpens after a few videos')}`}
               </p>
             )}
             {paused && (

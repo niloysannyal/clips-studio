@@ -1126,7 +1126,7 @@ def _gaming_prepare(source: Path, candidates: list, clip_dir: Path, config: dict
 
 
 def _try_gaming_render(intermediate: Path, render_path: Path, opts: dict, config: dict,
-                       ass_path: Path | None, vf_extra: str, normalize: bool) -> dict | None:
+                       ass_path: Path | None, vf_extra: str, normalize: bool, is_preview: bool = False) -> dict | None:
     """One clip in the gaming layout (gaming/run.py). None means the standard
     renderer takes it: a camera filling the frame, or any error at all."""
     try:
@@ -1134,7 +1134,7 @@ def _try_gaming_render(intermediate: Path, render_path: Path, opts: dict, config
 
         g = opts.get("gaming")
         return gaming_run.render(intermediate, render_path, g if isinstance(g, dict) else {}, config,
-                                 ass_path=ass_path, vf_extra=vf_extra, normalize=normalize)
+                                 ass_path=ass_path, vf_extra=vf_extra, normalize=normalize, is_preview=is_preview)
     except Exception as e:
         if config.get("clips", {}).get("whole"):
             # Detection can fail; preserve the entire frame using the existing
@@ -1486,6 +1486,7 @@ def _render_files(
     config: dict,
     render_opts: dict | None = None,
     content_language: str = "en",
+    is_preview: bool = False,
 ) -> tuple[Path, str]:
     """Pure file work — cut, track, crop, captions, color. NO database access
     and NO LLM call, so it is safe to run in a worker thread. Returns the
@@ -1535,7 +1536,8 @@ def _render_files(
     # Absent for every existing Shorts clip — their path is unchanged.
     landscape = bool(opts.get("profile"))
     # Loudness: on unless this clip opted out (see settings/editor).
-    normalize = bool(opts.get("normalize_audio", True))
+    # Skipped on preview renders to make preview generation fast.
+    normalize = False if is_preview else bool(opts.get("normalize_audio", True))
     # Podcast: opt-in, per video. Multi-cam footage is framed shot by shot, one
     # steady crop on whoever is talking in each (see video/podcast.py). Read
     # from the job config or a persisted per-clip flag.
@@ -1597,6 +1599,9 @@ def _render_files(
     ass_path = None
     # Per-clip style wins; otherwise the job/config default chosen at generate time.
     caption_style = _plain_caption_style(opts.get("caption_style") or config["clips"].get("caption_style"))
+    if opts.get("gaming") and isinstance(opts["gaming"], dict) and opts["gaming"].get("caption_y") is not None:
+        caption_style = dict(caption_style or {})
+        caption_style["caption_y"] = opts["gaming"]["caption_y"]
     # Where someone other than the main speaker talks, when the caption style
     # asks for them in a second colour (#126). Empty for every other clip.
     turns: list = []
@@ -1704,7 +1709,7 @@ def _render_files(
 
             if gaming:
                 gaming_kept = _try_gaming_render(intermediate, render_path, opts, config,
-                                                 ass_path, vf_extra, normalize)
+                                                 ass_path, vf_extra, normalize, is_preview=is_preview)
             if gaming_kept is not None:
                 pass  # rendered in the gaming layout (split or game only)
             elif podcast:

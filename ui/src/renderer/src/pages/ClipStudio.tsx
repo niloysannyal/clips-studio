@@ -17,6 +17,7 @@ import { useEvents } from '../lib/useEvents'
 import { useJobWatch } from '../lib/useJobWatch'
 import type { StudioTarget } from '../App'
 import type { Clip, StudioEvent, Video } from '../lib/types'
+import { TEMPLATES, getAllTemplates } from '../lib/templates'
 
 /** Browse and edit the clips of processed videos. New videos are started from
  *  the Dashboard; clicking a clip there navigates here with it selected. */
@@ -45,6 +46,9 @@ export default function ClipStudio({
   const [publishProvider, setPublishProvider] = useState<Provider>('woopsocial')
   const [publishing, setPublishing] = useState(false)
   const [clipType, setClipType] = useState<'all' | 'shorts' | 'longform'>('all')
+  const [workflowFolder, setWorkflowFolder] = useState<'all' | 'raw' | 'edited' | 'post_ready' | 'live'>('all')
+  const [sortBy, setSortBy] = useState<'viral' | 'monetized' | 'time' | 'recent' | 'duration'>('viral')
+  const [selectedClipIds, setSelectedClipIds] = useState<Set<number>>(new Set())
   const [exportingAll, setExportingAll] = useState(false)
   const [exportNotice, setExportNotice] = useState<string | null>(null)
   const pendingClip = useRef<number | null>(null)
@@ -229,34 +233,114 @@ export default function ClipStudio({
     return () => document.removeEventListener('mousedown', away)
   }, [openCreator])
 
-  const shownClips = useMemo(
-    () =>
-      clips.filter((c) =>
-        clipType === 'all'
-          ? true
-          : clipType === 'longform'
-            ? !!c.render_opts?.profile
-            : !c.render_opts?.profile
-      ),
-    [clips, clipType]
-  )
+  const folderCounts = useMemo(() => {
+    let raw = 0
+    let edited = 0
+    let postReady = 0
+    let live = 0
+    for (const c of clips) {
+      if (c.exported_at) postReady++
+      if (c.status === 'published' || c.status === 'live' || !!c.scheduled_for) live++
+      if (c.render_opts?.gaming || c.render_opts?.caption_style || c.render_opts?.edit) edited++
+      else if (!c.exported_at) raw++
+    }
+    return { all: clips.length, raw, edited, postReady, live }
+  }, [clips])
+
+  const shownClips = useMemo(() => {
+    const filtered = clips.filter((c) => {
+      // 1. Format filter
+      if (clipType === 'longform' && !c.render_opts?.profile) return false
+      if (clipType === 'shorts' && c.render_opts?.profile) return false
+
+      // 2. Workflow folder filter
+      if (workflowFolder === 'raw') {
+        return !c.exported_at && !c.render_opts?.gaming && !c.render_opts?.caption_style && !c.render_opts?.edit
+      }
+      if (workflowFolder === 'edited') {
+        return !!(c.render_opts?.gaming || c.render_opts?.caption_style || c.render_opts?.edit)
+      }
+      if (workflowFolder === 'post_ready') {
+        return !!c.exported_at
+      }
+      if (workflowFolder === 'live') {
+        return c.status === 'published' || c.status === 'live' || !!c.scheduled_for
+      }
+      return true
+    })
+
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'viral') {
+        return (b.score ?? 0) - (a.score ?? 0)
+      }
+      if (sortBy === 'monetized') {
+        const aMon = (a.end_s - a.start_s) >= 60 ? 1 : 0
+        const bMon = (b.end_s - b.start_s) >= 60 ? 1 : 0
+        if (bMon !== aMon) return bMon - aMon
+        return (b.score ?? 0) - (a.score ?? 0)
+      }
+      if (sortBy === 'time') {
+        return a.start_s - b.start_s
+      }
+      if (sortBy === 'recent') {
+        return b.id - a.id
+      }
+      if (sortBy === 'duration') {
+        return (b.end_s - b.start_s) - (a.end_s - a.start_s)
+      }
+      return 0
+    })
+  }, [clips, clipType, workflowFolder, sortBy])
+
+  const toggleSelectClip = (id: number): void => {
+    setSelectedClipIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const selectAll = (): void => {
+    setSelectedClipIds(new Set(shownClips.map((c) => c.id)))
+  }
+
+  const deselectAll = (): void => {
+    setSelectedClipIds(new Set())
+  }
+
+  const selectTopViral = (count = 10): void => {
+    const top = [...shownClips]
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, count)
+      .map((c) => c.id)
+    setSelectedClipIds(new Set(top))
+  }
+
   const toExport = useMemo(() => shownClips.filter((c) => !c.exported_at), [shownClips])
 
   // Every clip under the current format filter that isn't starred yet, into
   // the same folder single exports use. Exporting stars them.
   const exportAll = async (): Promise<void> => {
-    if (toExport.length === 0) return
+    const targets = selectedClipIds.size > 0
+      ? shownClips.filter((c) => selectedClipIds.has(c.id) && !c.exported_at)
+      : toExport
+
+    if (targets.length === 0) {
+      if (selectedClipIds.size > 0) alert('All selected clips are already exported / starred.')
+      return
+    }
     const folder = await getExportFolder()
-    const skipped = shownClips.length - toExport.length
+    const skipped = (selectedClipIds.size > 0 ? selectedClipIds.size : shownClips.length) - targets.length
     setExportingAll(true)
     setExportNotice(null)
     try {
       const res = await api.exportBatch(
-        toExport.map((c) => c.id),
+        targets.map((c) => c.id),
         folder
       )
       const n = res.exported.length
-      const missing = toExport.length - n
+      const missing = targets.length - n
       setExportNotice(
         `Exported ${n} clip${n === 1 ? '' : 's'} to ${folder}.` +
           (skipped > 0 ? ` Skipped ${skipped} already starred as exported.` : '') +
@@ -267,6 +351,69 @@ export default function ClipStudio({
       setExportNotice(`Export failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setExportingAll(false)
+    }
+  }
+
+  const [bulkApplying, setBulkApplying] = useState(false)
+  const [templatesList, setTemplatesList] = useState(() => getAllTemplates())
+  const [globalTemplateId, setGlobalTemplateId] = useState<string>('viral_split_70_30')
+
+  useEffect(() => {
+    const onUpdate = (): void => setTemplatesList(getAllTemplates())
+    window.addEventListener('custom-gaming-layouts-changed', onUpdate)
+    return () => window.removeEventListener('custom-gaming-layouts-changed', onUpdate)
+  }, [])
+
+  const applyGlobalTemplateBulk = async (): Promise<void> => {
+    const tmpl = templatesList.find((t) => t.id === globalTemplateId) ?? templatesList[0]
+    if (!tmpl || shownClips.length === 0) return
+
+    const targets = selectedClipIds.size > 0
+      ? shownClips.filter((c) => selectedClipIds.has(c.id))
+      : shownClips
+
+    const isSelective = selectedClipIds.size > 0
+    const confirmed = window.confirm(
+      `Apply template "${tmpl.name}" to ${targets.length} ${isSelective ? 'selected' : 'all shown'} clip(s) and queue re-render?\n\nThis will reformat them into ${
+        tmpl.format === 'shorts' ? '70/30 split vertical 9:16' : '16:9 widescreen'
+      } with optimal captions and watermark.`
+    )
+    if (!confirmed) return
+    setBulkApplying(true)
+    setExportNotice(null)
+    try {
+      let streamCam: [number, number, number, number] | undefined = [0.0, 0.4315, 0.1979, 0.2148]
+      let streamGameBox: [number, number, number, number] | undefined = [0.2674, 0.0, 0.4652, 1.0]
+
+      for (const c of shownClips) {
+        if (c.render_opts?.gaming?.cam) {
+          streamCam = c.render_opts.gaming.cam as [number, number, number, number]
+          if (c.render_opts.gaming.game_box) {
+            streamGameBox = c.render_opts.gaming.game_box as [number, number, number, number]
+          }
+          break
+        }
+      }
+
+      let count = 0
+      for (const c of targets) {
+        const effectiveOpts = JSON.parse(JSON.stringify(tmpl.renderOpts))
+        if (effectiveOpts.gaming) {
+          const clipCam = (c.render_opts?.gaming?.cam as [number, number, number, number]) || streamCam
+          const clipGameBox = (c.render_opts?.gaming?.game_box as [number, number, number, number]) || streamGameBox
+          effectiveOpts.gaming.cam = clipCam
+          effectiveOpts.gaming.game_box = clipGameBox
+          effectiveOpts.gaming.by = 'user'
+        }
+        await api.rerenderClip(c.id, undefined, effectiveOpts)
+        count++
+      }
+      setExportNotice(`Queued re-render for ${count} clip(s) with "${tmpl.name}". Check Queue for live progress!`)
+      if (activeVideo) await refreshClips(activeVideo)
+    } catch (e) {
+      setExportNotice(`Bulk template error: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBulkApplying(false)
     }
   }
 
@@ -358,21 +505,47 @@ export default function ClipStudio({
       {videos.length > 0 && (
         <div className="grid grid-cols-1 xl:grid-cols-5 gap-5 items-start">
           <div className="xl:col-span-3 space-y-3">
+            {/* Workflow Status Folders */}
+            <div className="flex items-center gap-1.5 p-1 bg-raised/40 rounded-lg border border-raised/60 text-xs overflow-x-auto">
+              <span className="text-[11px] font-bold text-muted uppercase tracking-wider px-2">Folders:</span>
+              {[
+                ['all', `📁 All (${folderCounts.all})`],
+                ['raw', `⚡ Raw (${folderCounts.raw})`],
+                ['edited', `🎨 Edited (${folderCounts.edited})`],
+                ['post_ready', `🚀 Post Ready (${folderCounts.postReady})`],
+                ['live', `🌐 Live (${folderCounts.live})`]
+              ].map(([fKey, fLabel]) => (
+                <button
+                  key={fKey}
+                  type="button"
+                  onClick={() => {
+                    setWorkflowFolder(fKey as any)
+                    setSelectedClipIds(new Set())
+                  }}
+                  className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap text-xs ${
+                    workflowFolder === fKey
+                      ? 'bg-accent text-white font-semibold shadow-sm'
+                      : 'text-muted hover:text-ink hover:bg-raised'
+                  }`}
+                >
+                  {fLabel}
+                </button>
+              ))}
+            </div>
+
             <div className="flex flex-wrap items-center gap-2">
-              <div className="flex gap-1.5" role="group" aria-label={t("Filter clips by format")}>
-                {(
-                  [
-                    ['all', 'All'],
-                    ['shorts', '📱 Shorts'],
-                    ['longform', '▭ Longform']
-                  ] as const
-                ).map(([value, label]) => (
+              <div className="flex gap-1" role="group" aria-label={t("Filter clips by format")}>
+                {[
+                  ['all', 'All'],
+                  ['shorts', '📱 Shorts'],
+                  ['longform', '▭ Longform']
+                ].map(([value, label]) => (
                   <button
                     key={value}
-                    onClick={() => setClipType(value)}
-                    className={`px-2.5 py-1 rounded-md text-xs ${
+                    onClick={() => setClipType(value as any)}
+                    className={`px-2 py-1 rounded text-xs ${
                       clipType === value
-                        ? 'bg-accent/20 text-accent font-medium'
+                        ? 'bg-accent/20 text-accent font-medium border border-accent/30'
                         : 'bg-raised text-muted hover:text-ink'
                     }`}
                   >
@@ -380,17 +553,99 @@ export default function ClipStudio({
                   </button>
                 ))}
               </div>
+
+              {/* Sort Selector */}
+              <div className="flex items-center gap-1.5 bg-raised/50 px-2 py-1 rounded border border-raised/70 text-xs">
+                <span className="text-muted font-medium">Sort:</span>
+                <select
+                  className="bg-base text-xs rounded px-1.5 py-0.5 border border-raised text-ink cursor-pointer"
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as any)}
+                >
+                  <option value="viral">🔥 Viral Score</option>
+                  <option value="monetized">🟢 Monetized (&gt;60s)</option>
+                  <option value="time">⏱️ Stream Order</option>
+                  <option value="recent">🕒 Most Recent</option>
+                  <option value="duration">⏳ Duration</option>
+                </select>
+              </div>
+
+              {/* Multi-Select Helpers */}
+              <div className="flex items-center gap-1 bg-raised/50 px-1.5 py-1 rounded border border-raised/70 text-xs">
+                <button
+                  type="button"
+                  className="text-[11px] px-1.5 py-0.5 rounded hover:bg-raised text-ink"
+                  onClick={selectAll}
+                  title="Select all shown clips"
+                >
+                  Select All
+                </button>
+                <button
+                  type="button"
+                  className="text-[11px] px-1.5 py-0.5 rounded hover:bg-raised text-muted hover:text-ink"
+                  onClick={deselectAll}
+                  disabled={selectedClipIds.size === 0}
+                  title="Clear selection"
+                >
+                  Deselect ({selectedClipIds.size})
+                </button>
+                <button
+                  type="button"
+                  className="text-[11px] px-1.5 py-0.5 rounded hover:bg-raised text-amber-400 font-medium"
+                  onClick={() => selectTopViral(10)}
+                  title="Select top 10 highest viral score clips"
+                >
+                  Top 10 Viral 🔥
+                </button>
+              </div>
+
+              {/* Global Template Selector & Bulk Re-render */}
+              <div className="flex items-center gap-1.5 bg-raised/50 px-2 py-1 rounded border border-raised/80 text-xs">
+                <span className="text-muted font-medium">Template:</span>
+                <select
+                  className="bg-base text-xs rounded px-2 py-0.5 border border-raised text-ink cursor-pointer max-w-[130px] truncate"
+                  value={globalTemplateId}
+                  onChange={(e) => setGlobalTemplateId(e.target.value)}
+                >
+                  {templatesList.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn-accent !py-0.5 !px-2 text-xs font-semibold"
+                  onClick={applyGlobalTemplateBulk}
+                  disabled={bulkApplying || shownClips.length === 0}
+                  title={
+                    selectedClipIds.size > 0
+                      ? `Batch apply template to ${selectedClipIds.size} selected clip(s)`
+                      : `Batch apply template to all ${shownClips.length} shown clip(s)`
+                  }
+                >
+                  {bulkApplying
+                    ? 'Applying…'
+                    : selectedClipIds.size > 0
+                      ? `Apply to Selected (${selectedClipIds.size}) ⚡`
+                      : `Apply to All (${shownClips.length}) ⚡`}
+                </button>
+              </div>
+
               <button
-                className="btn-accent !py-1 !px-3 text-xs ml-auto"
+                className="btn-accent !py-1 !px-3 text-xs ml-auto font-medium"
                 onClick={exportAll}
-                disabled={exportingAll || toExport.length === 0}
+                disabled={exportingAll || (selectedClipIds.size > 0 ? false : toExport.length === 0)}
                 title={
-                  toExport.length === 0
-                    ? 'Every clip here is already starred as exported'
-                    : `Export the ${toExport.length} clip${toExport.length === 1 ? '' : 's'} here that are not starred yet`
+                  selectedClipIds.size > 0
+                    ? `Export ${selectedClipIds.size} selected clip(s)`
+                    : `Export all unexported clip(s)`
                 }
               >
-                {exportingAll ? 'Exporting…' : `Export all (${toExport.length})`}
+                {exportingAll
+                  ? 'Exporting…'
+                  : selectedClipIds.size > 0
+                    ? `Export Selected (${selectedClipIds.size}) 🚀`
+                    : `Export all (${toExport.length})`}
               </button>
               {/* Deliberately not styled as a twin of Export beside it.
                   Export writes files you can delete; this posts publicly and
@@ -426,6 +681,8 @@ export default function ClipStudio({
                   key={clip.id}
                   clip={clip}
                   selected={clip.id === selectedClip}
+                  checked={selectedClipIds.has(clip.id)}
+                  onToggleSelect={() => toggleSelectClip(clip.id)}
                   onClick={() => setSelectedClip(clip.id)}
                   onDelete={() => deleteClip(clip.id)}
                   onToggleExported={() => toggleExported(clip)}

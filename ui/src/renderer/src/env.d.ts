@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 declare module '*.css'
 
 /** Importing an image gives you its URL — Vite copies the file into the

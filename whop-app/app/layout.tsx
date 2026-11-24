@@ -1,5 +1,6 @@
 import { Analytics } from "@vercel/analytics/next";
 import { WhopApp } from "@whop/react/components";
+import { Agentation } from "agentation";
 import type { Metadata } from "next";
 import "./globals.css";
 
@@ -44,12 +45,9 @@ export default function RootLayout({
 				<WhopApp appearance="dark" accentColor="sky">
 					{children}
 				</WhopApp>
-				{/* Vercel Web Analytics: page views only, no cookies and no
-				    cross-site tracking, so it needs no consent banner. It
-				    measures THIS marketing page — the desktop app still has no
-				    telemetry, and nothing here can see what anyone clips.
-				    Sends nothing until Web Analytics is switched on for the
-				    project in the Vercel dashboard. */}
+				{process.env.NODE_ENV === "development" && (
+					<Agentation endpoint="http://localhost:4747" appName="Clips Kitty Whop" />
+				)}
 				<Analytics />
 			</body>
 		</html>

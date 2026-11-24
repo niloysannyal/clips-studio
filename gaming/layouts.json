@@ -11,7 +11,7 @@
   "presets": {
     "split": {
       "label": "Split", "type": "stack", "rows": [["cam"], ["game"]],
-      "divider": [0.25, 0.5, 0.38], "order": "cam_top", "game_fit": "fill"
+      "divider": [0.25, 0.5, 0.32], "order": "cam_top", "game_fit": "fill"
     },
     "basecam": {
       "label": "Basecam", "type": "stack", "rows": [["cam"], ["game"]],
@@ -50,6 +50,10 @@
     "duo_split": {
       "label": "Duo split", "type": "stack", "rows": [["cam", "cam2"], ["game"]],
       "divider": [0.25, 0.45, 0.33], "order": "cam_top", "game_fit": "fill"
+    },
+    "custom": {
+      "label": "Custom", "type": "stack", "rows": [["cam"], ["game"]],
+      "divider": [0.15, 0.75, 0.32], "order": "cam_top", "game_fit": "fit"
     }
   }
 }

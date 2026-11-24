@@ -849,7 +849,34 @@ class Worker(threading.Thread):
         if "caption_style" in incoming:
             merged_style = {**render_opts.get("caption_style", {}), **(incoming["caption_style"] or {})}
             render_opts["caption_style"] = merged_style
-        render_opts.update({k: v for k, v in incoming.items() if k != "caption_style"})
+        if "gaming" in incoming:
+            existing_gaming = render_opts.get("gaming") or {}
+            inc_gaming = incoming.get("gaming") or {}
+            merged_gaming = {**existing_gaming, **inc_gaming}
+            if not inc_gaming.get("cam"):
+                if existing_gaming.get("cam"):
+                    merged_gaming["cam"] = existing_gaming["cam"]
+                else:
+                    # Look up creator's saved gaming layout
+                    crow = db.conn.execute(
+                        "SELECT c.gaming_layout FROM videos v JOIN creators c ON c.creator_id = v.creator_id WHERE v.video_id = ?",
+                        (video_id,)
+                    ).fetchone()
+                    if crow and crow["gaming_layout"]:
+                        try:
+                            c_layout = _json.loads(crow["gaming_layout"])
+                            if c_layout.get("cam"):
+                                merged_gaming["cam"] = c_layout["cam"]
+                            if c_layout.get("game_box") and not merged_gaming.get("game_box"):
+                                merged_gaming["game_box"] = c_layout["game_box"]
+                        except Exception:
+                            pass
+            if not inc_gaming.get("game_box") and existing_gaming.get("game_box"):
+                merged_gaming["game_box"] = existing_gaming["game_box"]
+            render_opts["gaming"] = merged_gaming
+        render_opts.update({k: v for k, v in incoming.items() if k not in ("caption_style", "gaming")})
+        if incoming.get("profile") is None and ("gaming" in incoming or incoming.get("clear_profile")):
+            render_opts.pop("profile", None)
         # A clip saved with the removed Highlights post style is made, and
         # saved, without it.
         render_opts = _drop_post_style(render_opts)

@@ -67,7 +67,8 @@ const CARD_ORDER = [
   'game_ui',
   'mosaic',
   'dual_cam',
-  'duo_split'
+  'duo_split',
+  'custom'
 ] as const
 const FRAMES = [0.1, 0.3, 0.5, 0.7, 0.9]
 const COLOUR: Record<BoxRole, string> = { cam: '#38BDF8', cam2: '#A78BFA', game: '#22C55E', ui: '#F59E0B' }
@@ -196,6 +197,12 @@ function Composition({
   )
 }
 
+interface CustomLayout {
+  id: string
+  name: string
+  settings: GamingSettings
+}
+
 export default function GamingLayoutEditor({
   source,
   context,
@@ -203,7 +210,8 @@ export default function GamingLayoutEditor({
   remember: rememberInitially,
   canRemember = true,
   onClose,
-  onDone
+  onDone,
+  onSaveAndRerender
 }: {
   source: LayoutSource
   /** 'video': set up before processing. 'clip': fixing one clip in the editor. */
@@ -213,16 +221,26 @@ export default function GamingLayoutEditor({
   canRemember?: boolean
   onClose: () => void
   onDone: (settings: GamingSettings, remember: boolean) => void
+  onSaveAndRerender?: (settings: GamingSettings, remember: boolean) => Promise<void>
 }): JSX.Element {
   // Where to start: the clip's or job's own choices; a layout from before
   // layouts existed was Half, in the order it had.
   const legacy = !settings.preset && Boolean(settings.cam_position || settings.game_fit)
+  const [customLayouts, setCustomLayouts] = useState<CustomLayout[]>(() => {
+    try {
+      const raw = localStorage.getItem('custom-gaming-layouts')
+      return raw ? JSON.parse(raw) : []
+    } catch {
+      return []
+    }
+  })
+  const [activeCustomId, setActiveCustomId] = useState<string | null>(null)
   const [preset, setPreset] = useState<string>(
     settings.preset && settings.preset in PRESETS ? settings.preset : legacy ? 'half' : 'split'
   )
   const [order, setOrder] = useState<'cam_top' | 'game_top'>(
     (settings.order as 'cam_top' | 'game_top') ??
-      (settings.cam_position === 'bottom' ? 'game_top' : (PRESETS[preset]?.order as 'cam_top' | 'game_top') ?? 'cam_top')
+    (settings.cam_position === 'bottom' ? 'game_top' : (PRESETS[preset]?.order as 'cam_top' | 'game_top') ?? 'cam_top')
   )
   const [divider, setDivider] = useState<number | undefined>(settings.divider)
   const [safe, setSafe] = useState<string>(settings.safe ?? 'tiktok')
@@ -230,6 +248,9 @@ export default function GamingLayoutEditor({
     (settings.game_fit as 'fit' | 'fill') ?? (legacy ? 'fit' : (PRESETS[preset]?.game_fit as 'fit' | 'fill') ?? 'fill')
   )
   const [gameAlign, setGameAlign] = useState<'left' | 'center' | 'right'>(settings.game_align ?? 'center')
+  const [gameAnchor, setGameAnchor] = useState<'top' | 'center' | 'bottom'>(
+    (settings.game_anchor as 'top' | 'center' | 'bottom') ?? 'center'
+  )
   const decided = settings.by === 'user' || settings.by === 'creator'
   const found: FrameBox | null = settings.used_cam ?? (settings.by === 'video' ? settings.cam ?? null : null)
   // Draw it is the default: the webcam and game boxes are on the frame from
@@ -261,6 +282,9 @@ export default function GamingLayoutEditor({
   const [selected, setSelected] = useState<Placeable | null>(null)
   const [guides, setGuides] = useState<Targets>({ xs: [], ys: [] })
   const [showGrid, setShowGrid] = useState(false)
+  const [captionY, setCaptionY] = useState<number>(settings.caption_y ?? 0.88)
+  const [captionDragging, setCaptionDragging] = useState(false)
+  const captionDrag = useRef<boolean>(false)
   // Fullscreen like the video player's (the whole monitor, Esc to leave),
   // remembered for next time; minimised to a bar to get at the app.
   const [full, setFull] = useState<boolean>(() => {
@@ -404,19 +428,25 @@ export default function GamingLayoutEditor({
     .filter((b): b is FrameBox => !!b)
     .map(clearZone)
 
-  const settingsFor = (p: string, gameBox: FrameBox | null = boxes.game): LayoutSettings => ({
+  const settingsFor = (
+    p: string,
+    gameBox: FrameBox | null = boxes.game,
+    overrideGameFit?: string
+  ): LayoutSettings => ({
     preset: p,
-    order,
-    divider,
+    order: p === preset ? order : ((PRESETS[p]?.order as string) ?? 'cam_top'),
+    divider: p === preset ? divider : undefined,
     safe,
-    game_fit: gameFit,
+    game_fit: overrideGameFit ?? (p === preset ? gameFit : (PRESETS[p]?.game_fit ?? 'fill')),
     game_align: gameAlign,
+    game_anchor: p === preset ? gameAnchor : 'center',
     cam: camUnknown ? PLACEHOLDER_CAM : camBox,
     cam2: boxes.cam2,
     game_box: gameBox,
     ui_box: boxes.ui,
     panels,
-    places
+    places,
+    caption_y: captionY
   })
 
   // The streamer's head on this frame: the surest person inside the webcam.
@@ -506,8 +536,8 @@ export default function GamingLayoutEditor({
       xs.push(x, x + w / 2, x + w)
       ys.push(y, y + h / 2, y + h)
     }
-    // Zoomed to fill, the game box keeps its space's shape as it's resized.
-    const shape = d.role === 'game' && gameShape ? gameShape * (fw / fh) : null
+    // Zoomed to fill, the game box keeps its space's shape as it's resized unless holding Alt.
+    const shape = d.role === 'game' && gameShape && !e.altKey ? gameShape * (fw / fh) : null
     const { box, guides: lines } = dragLayer(px(d.box), d.mode, (q.x - d.ox) * fw, (q.y - d.oy) * fh, {
       aspect: shape,
       canvas: [fw, fh],
@@ -602,10 +632,23 @@ export default function GamingLayoutEditor({
   }
   const endDrags = (): void => {
     dividerDrag.current = false
+    captionDrag.current = false
+    setCaptionDragging(false)
     layerDrag.current = null
     setGuides({ xs: [], ys: [] })
   }
   const onPreviewMove = (e: React.PointerEvent): void => {
+    if (captionDrag.current && previewRef.current) {
+      const r = previewRef.current.getBoundingClientRect()
+      let nextY = (e.clientY - r.top) / r.height
+      if (!e.altKey) {
+        if (Math.abs(nextY - 0.41) < 0.025) nextY = 0.41
+        else if (Math.abs(nextY - 0.50) < 0.025) nextY = 0.50
+        else if (Math.abs(nextY - 0.88) < 0.025) nextY = 0.88
+      }
+      setCaptionY(clamp(nextY, 0.05, 0.95))
+      return
+    }
     if (layerDrag.current) {
       moveLayer(e)
       return
@@ -620,10 +663,21 @@ export default function GamingLayoutEditor({
   }
 
   const pick = (id: string): void => {
+    setActiveCustomId(null)
     setPreset(id)
+    if (id === 'custom') {
+      setOrder('cam_top')
+      setGameFit('fit')
+      setGameAnchor('center')
+      if (!boxes.game) setBoxes((b) => ({ ...b, game: [0.0, 0.0, 1.0, 1.0] }))
+      if (!boxes.cam) setBox('cam', found ?? NEW_BOX.cam)
+      setCamMode('draw')
+      return
+    }
     // Each layout starts from its own order (Basecam: the game on top); the
     // On top switch then changes it.
-    setOrder(((PRESETS[id].order as string) ?? 'cam_top') as 'cam_top' | 'game_top')
+    const s = PRESETS[id]
+    setOrder(((s?.order as string) ?? 'cam_top') as 'cam_top' | 'game_top')
     setDivider(undefined)
     const r = rolesOf(id)
     if (r.has('ui') && !boxes.ui) setBox('ui', NEW_BOX.ui)
@@ -631,12 +685,47 @@ export default function GamingLayoutEditor({
     if ((r.has('cam') || r.has('cam2')) && camMode === 'none') setCamMode('auto')
   }
 
+  const applyCustomLayout = (custom: CustomLayout): void => {
+    setActiveCustomId(custom.id)
+    const s = custom.settings
+    if (s.preset && s.preset in PRESETS) setPreset(s.preset)
+    if (s.order) setOrder(s.order as 'cam_top' | 'game_top')
+    setDivider(s.divider)
+    if (s.safe) setSafe(s.safe)
+    if (s.game_fit) setGameFit(s.game_fit as 'fit' | 'fill')
+    if (s.game_align) setGameAlign(s.game_align)
+    if (s.game_anchor) setGameAnchor(s.game_anchor)
+    if (s.caption_y !== undefined) setCaptionY(s.caption_y)
+    setBoxes({
+      cam: s.cam ?? boxes.cam,
+      cam2: s.cam2 ?? null,
+      game: s.game_box ?? null,
+      ui: s.ui_box ?? null
+    })
+    if (s.cam) setCamMode('draw')
+    else if (s.cam === null) setCamMode('none')
+    if (s.panels) setPanels(s.panels)
+    if (s.places) setPlaces(s.places)
+  }
+
+  const deleteCustomLayout = (id: string, e: React.MouseEvent): void => {
+    e.stopPropagation()
+    const updated = customLayouts.filter((c) => c.id !== id)
+    setCustomLayouts(updated)
+    if (activeCustomId === id) setActiveCustomId(null)
+    try {
+      localStorage.setItem('custom-gaming-layouts', JSON.stringify(updated))
+    } catch {
+      // ignore
+    }
+  }
+
   const snap = async (): Promise<void> => {
     if (!boxes.cam) return
     setSnapping(true)
     try {
       camTouched.current = true
-    const r = await api.layoutSnap(source, boxes.cam)
+      const r = await api.layoutSnap(source, boxes.cam)
       setBox('cam', r.box)
       setNote(
         r.bordered.some(Boolean)
@@ -650,8 +739,9 @@ export default function GamingLayoutEditor({
     }
   }
 
-  const done = (): void => {
-    const out: GamingSettings = { preset, order, safe, game_fit: gameFit, game_align: gameAlign }
+  const buildOutput = (): GamingSettings => {
+    const out: GamingSettings = { preset, order, safe, game_fit: gameFit, game_align: gameAlign, game_anchor: gameAnchor }
+    if (captionY !== undefined) out.caption_y = Math.round(captionY * 1000) / 1000
     if (divider !== undefined) out.divider = Math.round(divider * 1000) / 1000
     if (gameBox) out.game_box = gameBox // as shown: what renders
     if (panels !== undefined) out.panels = panels
@@ -664,8 +754,50 @@ export default function GamingLayoutEditor({
       if (settings.by === 'video') Object.assign(out, { cam: settings.cam ?? null, by: 'video' })
       else out.by = 'clip'
     }
+    return out
+  }
+
+  const done = (): void => {
+    const out = buildOutput()
     onDone(out, remember)
     onClose()
+  }
+
+  const [savingRerender, setSavingRerender] = useState(false)
+  const saveAndRerender = async (): Promise<void> => {
+    if (!onSaveAndRerender) {
+      done()
+      return
+    }
+    setSavingRerender(true)
+    try {
+      const out = buildOutput()
+      await onSaveAndRerender(out, remember)
+      onClose()
+    } catch (e) {
+      alert(`Save error: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSavingRerender(false)
+    }
+  }
+
+  const [presetSavedNotice, setPresetSavedNotice] = useState('')
+  const saveAsPreset = (): void => {
+    const name = window.prompt('Enter a name for this custom layout preset:', `Custom ${preset} (Divider: ${Math.round((divider ?? 0.32) * 100)}%)`)
+    if (!name || !name.trim()) return
+    const out = buildOutput()
+    try {
+      const newCustom: CustomLayout = { id: `custom_${Date.now()}`, name: name.trim(), settings: out }
+      const updated = [...customLayouts, newCustom]
+      setCustomLayouts(updated)
+      setActiveCustomId(newCustom.id)
+      localStorage.setItem('custom-gaming-layouts', JSON.stringify(updated))
+      window.dispatchEvent(new Event('custom-gaming-layouts-changed'))
+      setPresetSavedNotice(`Saved preset "${name.trim()}"!`)
+      setTimeout(() => setPresetSavedNotice(''), 3000)
+    } catch {
+      alert('Could not save preset to local storage.')
+    }
   }
 
   // Boxes drawn on the frame for this layout. The game's is where the layout
@@ -687,9 +819,8 @@ export default function GamingLayoutEditor({
           key={v}
           onClick={() => onChange(v)}
           aria-pressed={value === v}
-          className={`px-2 py-1 text-xs ${
-            value === v ? 'bg-accent/20 text-accent font-medium' : 'bg-raised text-muted hover:text-ink'
-          }`}
+          className={`px-2 py-1 text-xs ${value === v ? 'bg-accent/20 text-accent font-medium' : 'bg-raised text-muted hover:text-ink'
+            }`}
         >
           {t(label)}
         </button>
@@ -742,9 +873,8 @@ export default function GamingLayoutEditor({
     >
       <div
         ref={panelRef}
-        className={`bg-surface overflow-y-auto space-y-3 p-4 ${
-          full ? 'w-full h-full' : 'border border-raised/60 rounded-2xl w-full max-w-[1280px] max-h-full'
-        }`}
+        className={`bg-surface overflow-y-auto space-y-3 p-4 ${full ? 'w-full h-full' : 'border border-raised/60 rounded-2xl w-full max-w-[1280px] max-h-full'
+          }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-2">
@@ -774,35 +904,137 @@ export default function GamingLayoutEditor({
 
         <div className="flex gap-4 items-start">
           {/* ---- layouts ---- */}
-          <div className="shrink-0 w-[222px]">
-            <p className="label mb-1.5">{t('Layouts')}</p>
+          <div className="shrink-0 w-[222px] flex flex-col gap-2 max-h-[calc(100vh-220px)] overflow-y-auto pr-1">
+            <div className="flex items-center justify-between">
+              <p className="label">{t('Layouts')}</p>
+              <button
+                type="button"
+                onClick={saveAsPreset}
+                className="text-[10px] text-accent hover:underline flex items-center gap-0.5 font-medium"
+                title="Save current layout as a custom preset"
+              >
+                + New Custom
+              </button>
+            </div>
+
+            {customLayouts.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[10px] uppercase tracking-wider text-muted font-semibold">
+                  ⭐ My Custom ({customLayouts.length})
+                </p>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {customLayouts.map((custom) => {
+                    const s = custom.settings
+                    const customPlan = plan(
+                      src.w,
+                      src.h,
+                      {
+                        preset: s.preset || 'split',
+                        order: s.order || 'cam_top',
+                        divider: s.divider,
+                        safe: s.safe || 'tiktok',
+                        game_fit: s.game_fit || 'fill',
+                        game_align: s.game_align || 'center',
+                        cam: s.cam,
+                        cam2: s.cam2,
+                        game_box: s.game_box,
+                        ui_box: s.ui_box,
+                        panels: s.panels,
+                        places: s.places
+                      },
+                      cleanHeads
+                    )
+                    const isSelected = activeCustomId === custom.id
+                    return (
+                      <div key={custom.id} className="relative group">
+                        <button
+                          type="button"
+                          onClick={() => applyCustomLayout(custom)}
+                          className={`w-full rounded-lg p-1 text-[10px] flex flex-col items-center gap-1 border ${isSelected
+                            ? 'border-accent bg-accent/10 text-accent ring-1 ring-accent'
+                            : 'border-raised hover:border-muted text-muted hover:text-ink'
+                            }`}
+                          title={custom.name}
+                        >
+                          <span className="truncate w-full text-center font-medium">{custom.name}</span>
+                          {loaded ? (
+                            <Composition
+                              p={customPlan}
+                              frameUrl={frameUrl}
+                              src={src}
+                              width={56}
+                              placeholderCam={camUnknown}
+                            />
+                          ) : (
+                            <div className="bg-black" style={{ width: 56, height: 100 }} />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => deleteCustomLayout(custom.id, e)}
+                          className="absolute -top-1 -right-1 size-4 bg-red-600/90 text-white rounded-full flex items-center justify-center text-[9px] opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500 shadow"
+                          title="Delete custom preset"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            <p className="text-[10px] uppercase tracking-wider text-muted font-semibold mt-1">Standard Presets</p>
             <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label={t('Layouts')}>
               {CARD_ORDER.map((id) => {
+                if (id === 'custom') {
+                  const selected = preset === 'custom' && !activeCustomId
+                  return (
+                    <button
+                      key="custom"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => pick('custom')}
+                      className={`rounded-lg p-1 text-[10px] flex flex-col items-center justify-between border transition-all ${selected
+                        ? 'border-accent bg-accent/20 text-accent font-semibold shadow-md ring-1 ring-accent'
+                        : 'border-dashed border-accent/60 hover:border-accent text-accent/80 hover:text-accent bg-accent/5'
+                        }`}
+                      style={{ height: 122 }}
+                      title={t('Create or freely edit a custom gaming layout without restrictions')}
+                    >
+                      <span className="truncate w-full text-center font-bold tracking-wide">⭐ Custom</span>
+                      <div className="w-[56px] h-[90px] rounded border border-dashed border-accent/40 bg-accent/10 flex flex-col items-center justify-center gap-1 p-1">
+                        <span className="text-base">📐</span>
+                        <span className="text-[8px] font-semibold text-center leading-tight">Freeform<br />Layout</span>
+                      </div>
+                    </button>
+                  )
+                }
+                const presetSpec = PRESETS[id]
                 const cardPlan = plan(
                   src.w,
                   src.h,
                   {
-                    ...settingsFor(id),
-                    order: preset === id ? order : ((PRESETS[id].order as string) ?? 'cam_top'),
+                    ...settingsFor(id, undefined, presetSpec?.game_fit ?? 'fill'),
+                    order: preset === id ? order : ((presetSpec?.order as string) ?? 'cam_top'),
                     divider: preset === id ? divider : undefined,
                     ui_box: boxes.ui ?? NEW_BOX.ui,
                     cam2: boxes.cam2 ?? NEW_BOX.cam2
                   },
                   cleanHeads
                 )
-                const selected = preset === id
+                const selected = preset === id && !activeCustomId
                 return (
                   <button
                     key={id}
                     role="radio"
                     aria-checked={selected}
                     onClick={() => pick(id)}
-                    className={`rounded-lg p-1 text-[10px] flex flex-col items-center gap-1 border ${
-                      selected ? 'border-accent bg-accent/10 text-accent' : 'border-raised hover:border-muted text-muted'
-                    }`}
-                    title={t(PRESETS[id].label)}
+                    className={`rounded-lg p-1 text-[10px] flex flex-col items-center gap-1 border ${selected ? 'border-accent bg-accent/10 text-accent font-semibold' : 'border-raised hover:border-muted text-muted'
+                      }`}
+                    title={t(presetSpec?.label ?? id)}
                   >
-                    <span className="truncate w-full text-center">{t(PRESETS[id].label)}</span>
+                    <span className="truncate w-full text-center">{t(presetSpec?.label ?? id)}</span>
                     {loaded ? (
                       <Composition p={cardPlan} frameUrl={frameUrl} src={src} width={56} placeholderCam={camUnknown} />
                     ) : (
@@ -944,9 +1176,8 @@ export default function GamingLayoutEditor({
                       onPointerDown={(e) => startDrag(e, role, 'move')}
                     >
                       <span
-                        className={`absolute left-0 text-[11px] font-semibold px-1.5 leading-4 ${
-                          role === 'game' ? 'bottom-0 rounded-tr' : 'top-0 rounded-br'
-                        }`}
+                        className={`absolute left-0 text-[11px] font-semibold px-1.5 leading-4 ${role === 'game' ? 'bottom-0 rounded-tr' : 'top-0 rounded-br'
+                          }`}
                         style={{ background: COLOUR[role], color: '#0B1220' }}
                       >
                         {t(LABEL[role])}
@@ -1018,9 +1249,8 @@ export default function GamingLayoutEditor({
                     setAt(f)
                     setScrub(f)
                   }}
-                  className={`flex-1 aspect-video rounded-md overflow-hidden bg-base border-2 ${
-                    Math.abs(at - f) < 0.001 ? 'border-accent' : 'border-transparent hover:border-raised'
-                  }`}
+                  className={`flex-1 aspect-video rounded-md overflow-hidden bg-base border-2 ${Math.abs(at - f) < 0.001 ? 'border-accent' : 'border-transparent hover:border-raised'
+                    }`}
                   aria-label={`${t('Frame')} ${i + 1}`}
                 >
                   <img
@@ -1145,9 +1375,8 @@ export default function GamingLayoutEditor({
                       {HANDLES.map(([handle, fx, fy, cursor]) => (
                         <span
                           key={handle}
-                          className={`absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full bg-white border border-slate-700 shadow ${
-                            on ? '' : 'opacity-0 group-hover:opacity-100'
-                          }`}
+                          className={`absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full bg-white border border-slate-700 shadow ${on ? '' : 'opacity-0 group-hover:opacity-100'
+                            }`}
                           style={{ left: `${(round ? ON_CIRCLE(fx) : fx) * 100}%`, top: `${(round ? ON_CIRCLE(fy) : fy) * 100}%`, cursor }}
                           onPointerDown={(ev) => startLayer(ev, role, handle)}
                         />
@@ -1178,6 +1407,35 @@ export default function GamingLayoutEditor({
                   <div className="h-1 w-12 rounded-full bg-white/90 shadow" />
                 </div>
               )}
+
+              {/* Draggable Caption Region Box */}
+              <div
+                className="absolute left-[8%] right-[8%] cursor-ns-resize group rounded-md border-2 border-dashed transition-all flex flex-col items-center justify-center py-1 px-2 select-none"
+                style={{
+                  top: `${captionY * 100}%`,
+                  transform: 'translateY(-50%)',
+                  height: 38 * k * (1920 / 480),
+                  borderColor: captionDragging ? '#FACC15' : 'rgba(250, 204, 21, 0.75)',
+                  background: captionDragging ? 'rgba(250, 204, 21, 0.25)' : 'rgba(0, 0, 0, 0.55)',
+                  boxShadow: captionDragging ? '0 0 12px rgba(250, 204, 21, 0.6)' : '0 2px 6px rgba(0,0,0,0.4)',
+                  zIndex: 30
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation()
+                  e.preventDefault()
+                  setCaptionDragging(true)
+                  captionDrag.current = true
+                  previewRef.current?.setPointerCapture(e.pointerId)
+                }}
+                title={t('Drag up or down to place captions in blur zones or anywhere')}
+              >
+                <div className="flex items-center gap-1 text-[10px] font-bold text-yellow-300 drop-shadow">
+                  <span>🔤 Captions ({Math.round(captionY * 100)}%)</span>
+                </div>
+                <span className="text-[9px] text-white/90 font-semibold tracking-wide uppercase drop-shadow text-center truncate w-full">
+                  SAMPLE CAPTION TEXT
+                </span>
+              </div>
             </div>
             {faceText && (
               <p className={faceText.startsWith('⚠') ? 'text-amber-400' : faceText.startsWith('✓') ? 'text-accent' : 'text-muted'}>
@@ -1212,7 +1470,9 @@ export default function GamingLayoutEditor({
                     ['game_top', 'Game']
                   ],
                   order,
-                  setOrder
+                  (newOrder) => {
+                    setOrder(newOrder)
+                  }
                 )}
               </div>
             )}
@@ -1246,20 +1506,135 @@ export default function GamingLayoutEditor({
                 )}
               </div>
             )}
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <div className={`flex items-center gap-2 ${spec.type === 'full' ? 'hidden' : ''}`}>
-                <span className="text-muted w-14" style={{ color: COLOUR.game }}>
+                <span className="text-muted w-14 shrink-0" style={{ color: COLOUR.game }}>
                   {t('Game')}
                 </span>
                 {segment(
                   [
-                    ['fit', 'Whole'],
+                    ['fit', 'Fit with Blur (Wide)'],
                     ['fill', 'Zoom to fill']
                   ],
                   gameFit,
                   setGameFit
                 )}
               </div>
+
+              {/* Quick Aspect Presets for Game */}
+              <div className="flex items-center gap-1.5 pt-0.5">
+                <span className="text-[11px] text-muted w-14 shrink-0">{t('Aspect')}</span>
+                <div className="flex gap-1 flex-wrap">
+                  <button
+                    type="button"
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${gameFit === 'fit' && boxes.game && boxes.game[0] === 0 && boxes.game[2] === 1
+                      ? 'bg-accent/20 text-accent font-semibold'
+                      : 'bg-raised text-muted hover:text-ink'
+                      }`}
+                    onClick={() => {
+                      setGameFit('fit')
+                      setBoxes((b) => ({ ...b, game: [0.0, 0.0, 1.0, 1.0] }))
+                    }}
+                    title={t('Fit full 16:9 widescreen gameplay on blurred background')}
+                  >
+                    16:9 Full
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${gameFit === 'fit' && boxes.game && Math.abs(boxes.game[2] - 0.75) < 0.05
+                      ? 'bg-accent/20 text-accent font-semibold'
+                      : 'bg-raised text-muted hover:text-ink'
+                      }`}
+                    onClick={() => {
+                      setGameFit('fit')
+                      setBoxes((b) => ({ ...b, game: [0.125, 0.0, 0.75, 1.0] }))
+                    }}
+                    title={t('Fit 4:3 wide action view on blurred background (captures driver & passenger)')}
+                  >
+                    4:3 Wide
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${gameFit === 'fill' ? 'bg-accent/20 text-accent font-semibold' : 'bg-raised text-muted hover:text-ink'
+                      }`}
+                    onClick={() => {
+                      setGameFit('fill')
+                      setBoxes((b) => ({ ...b, game: null }))
+                    }}
+                    title={t('Zoom to fill vertical 9:16 portrait slot')}
+                  >
+                    9:16 Portrait
+                  </button>
+                </div>
+              </div>
+
+              {gameFit === 'fit' && spec.type === 'stack' && (
+                <div className="flex items-center gap-2 pt-0.5">
+                  <span className="text-[11px] text-muted w-14 shrink-0">{t('Position')}</span>
+                  {segment(
+                    [
+                      ['center', 'Centered (Dual Blur)'],
+                      ['top', order === 'cam_top' ? 'Flush with Cam' : 'Top'],
+                      ['bottom', order === 'game_top' ? 'Flush with Cam' : 'Bottom']
+                    ],
+                    gameAnchor,
+                    setGameAnchor
+                  )}
+                </div>
+              )}
+
+              {/* Caption Placement with Blur Zone Snapping */}
+              <div className="space-y-1 pt-1 border-t border-raised/60">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-yellow-400 flex items-center gap-1">
+                    <span>🔤</span> {t('Captions')} ({Math.round(captionY * 100)}%)
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${Math.abs(captionY - 0.41) < 0.02
+                        ? 'bg-yellow-400/20 text-yellow-300 border border-yellow-400/50 font-bold'
+                        : 'bg-raised text-muted hover:text-ink'
+                        }`}
+                      onClick={() => setCaptionY(0.41)}
+                      title={t('Snap captions into the upper blur band between streamer and gameplay')}
+                    >
+                      Upper Blur (41%)
+                    </button>
+                    <button
+                      type="button"
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${Math.abs(captionY - 0.88) < 0.02
+                        ? 'bg-yellow-400/20 text-yellow-300 border border-yellow-400/50 font-bold'
+                        : 'bg-raised text-muted hover:text-ink'
+                        }`}
+                      onClick={() => setCaptionY(0.88)}
+                      title={t('Snap captions into the lower blur band below gameplay')}
+                    >
+                      Lower Blur (88%)
+                    </button>
+                    <button
+                      type="button"
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${Math.abs(captionY - 0.50) < 0.02
+                        ? 'bg-yellow-400/20 text-yellow-300 border border-yellow-400/50 font-bold'
+                        : 'bg-raised text-muted hover:text-ink'
+                        }`}
+                      onClick={() => setCaptionY(0.50)}
+                      title={t('Center captions on screen')}
+                    >
+                      Center (50%)
+                    </button>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={95}
+                  value={Math.round(captionY * 100)}
+                  onChange={(e) => setCaptionY(Number(e.target.value) / 100)}
+                  className="w-full accent-yellow-400 h-1 bg-raised rounded cursor-pointer"
+                />
+              </div>
+
               {(spec.type === 'full' ? spec.game_fit === 'fill' : gameFit === 'fill') && !boxes.game && (
                 <div className="flex items-center gap-2">
                   <span className="text-muted w-14">{t('Crop')}</span>
@@ -1275,7 +1650,7 @@ export default function GamingLayoutEditor({
                 </div>
               )}
               {boxes.game && (
-                <button className="btn-ghost !py-1 w-full" onClick={() => setBoxes((b) => ({ ...b, game: null }))}>
+                <button className="btn-ghost !py-1 w-full text-xs" onClick={() => setBoxes((b) => ({ ...b, game: null }))}>
                   {t('Let Clips Kitty pick the game area')}
                 </button>
               )}
@@ -1283,9 +1658,18 @@ export default function GamingLayoutEditor({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 justify-end">
+        <div className="flex items-center gap-3 justify-end flex-wrap pt-2 border-t border-raised/50">
+          {presetSavedNotice && <span className="text-xs text-emerald-400 font-medium mr-auto">✓ {presetSavedNotice}</span>}
+          <button
+            type="button"
+            className="btn-ghost !py-1 text-xs text-muted hover:text-ink mr-auto"
+            onClick={saveAsPreset}
+            title="Save these webcam & game coordinates as a reusable preset"
+          >
+            ⭐ Save as Preset…
+          </button>
           {canRemember && (
-            <label className="flex items-center gap-2 text-xs text-muted mr-auto cursor-pointer">
+            <label className="flex items-center gap-2 text-xs text-muted cursor-pointer">
               <input
                 type="checkbox"
                 className="size-4 accent-[#38BDF8]"
@@ -1295,12 +1679,26 @@ export default function GamingLayoutEditor({
               {t('Remember for this creator’s next videos')}
             </label>
           )}
-          <button className="btn-ghost" onClick={onClose}>
+          <button className="btn-ghost !py-1.5" onClick={onClose}>
             {t('Cancel')}
           </button>
-          <button className="btn-accent" onClick={done}>
-            {context === 'video' ? t('Use this layout') : t('Done')}
+          <button
+            className="btn-ghost !py-1.5 !px-3 border border-raised hover:bg-raised text-ink text-xs font-medium flex items-center gap-1.5"
+            onClick={done}
+            title={context === 'clip' ? 'Save layout to this clip without re-rendering yet' : 'Done'}
+          >
+            <span>💾 {context === 'clip' ? t('Save to this Clip') : t('Done')}</span>
           </button>
+          {context === 'clip' && (
+            <button
+              className="btn-accent !py-1.5 !px-3 text-xs font-semibold flex items-center gap-1.5"
+              onClick={saveAndRerender}
+              disabled={savingRerender}
+              title="Save layout and immediately queue a re-render for this clip"
+            >
+              <span>⚡ {savingRerender ? t('Queueing…') : t('Save & Re-render Now')}</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

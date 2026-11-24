@@ -17,6 +17,8 @@ const PROFILE_BADGE: Record<string, string> = {
 export default function ClipCard({
   clip,
   selected,
+  checked,
+  onToggleSelect,
   onClick,
   onDelete,
   onToggleExported,
@@ -24,6 +26,8 @@ export default function ClipCard({
 }: {
   clip: Clip
   selected: boolean
+  checked?: boolean
+  onToggleSelect?: () => void
   onClick: () => void
   /** Cull this clip straight from the grid, without opening it. */
   onDelete?: () => void
@@ -93,9 +97,34 @@ export default function ClipCard({
               ▶
             </div>
           )}
-          <span className="absolute top-2 left-2">
+          {onToggleSelect && (
+            <button
+              type="button"
+              aria-label={checked ? 'Deselect clip' : 'Select clip'}
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleSelect()
+              }}
+              className={`absolute top-2 left-2 z-20 size-5 rounded flex items-center justify-center text-xs font-bold transition-all ${
+                checked
+                  ? 'bg-accent text-white shadow ring-2 ring-accent/60'
+                  : 'bg-black/60 hover:bg-black/90 text-white/50 border border-white/30'
+              }`}
+            >
+              {checked ? '✓' : ''}
+            </button>
+          )}
+          <span className={`absolute top-2 ${onToggleSelect ? 'left-8' : 'left-2'}`}>
             <ScoreBadge score={clip.score} />
           </span>
+          {duration >= 60 && (
+            <span
+              className="absolute bottom-2 left-2 bg-emerald-950/90 border border-emerald-500/50 text-emerald-300 text-[10px] font-bold px-1.5 py-0.5 rounded shadow-sm"
+              title="Monetized: clip is >60 seconds (TikTok & YouTube Monetization ready)"
+            >
+              🟢 60s+
+            </span>
+          )}
           {badge && (
             <span
               className={`absolute ${onDelete ? 'top-9' : 'top-2'} right-2 bg-amber-500/90 text-black px-1.5 py-0.5 rounded text-[10px] font-bold`}

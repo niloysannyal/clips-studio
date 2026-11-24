@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { api } from '../../lib/api'
-import type { QueueJob } from '../../lib/types'
+import type { Clip, QueueJob } from '../../lib/types'
 import type { JobProgress } from '../../lib/jobProgress'
-import { etaSeconds, formatEta } from '../../lib/jobProgress'
+import { currentFraction, etaSeconds, formatEta } from '../../lib/jobProgress'
 import { describeOptions, jobLabel, ranFor, sourceOf } from '../../lib/queue'
 import QueueItemSettings from './QueueItemSettings'
 import { t } from '../../lib/i18n'
@@ -50,6 +50,7 @@ export default function QueueItem({
   total,
   live,
   now,
+  clipMap,
   onChanged,
   onOpenInStudio
 }: {
@@ -60,6 +61,7 @@ export default function QueueItem({
   /** Live progress, only for the running row. */
   live?: JobProgress
   now: number
+  clipMap?: Map<number, Clip>
   onChanged: () => void
   onOpenInStudio?: (videoId: string) => void
 }): JSX.Element {
@@ -87,6 +89,8 @@ export default function QueueItem({
   const running = job.status === 'running'
   const waiting = job.status === 'queued'
   const eta = running && live ? etaSeconds(live, now) : null
+  const pct = running && live ? Math.round(currentFraction(live, now) * 100) : 0
+  const elapsed = running && live ? Math.max(0, Math.round((now - live.startedAt) / 1000)) : 0
   const took = ranFor(job)
   const notDownloaded = !!job.error && MODEL_NOT_DOWNLOADED.test(job.error)
   // A model never downloaded keeps the cloud suggestion beside the Models page.
@@ -103,38 +107,45 @@ export default function QueueItem({
             {waiting && index > 0 && (
               <span className="text-xs text-muted tabular-nums shrink-0">#{index}</span>
             )}
-            <p className="font-medium truncate min-w-0" title={job.url || jobLabel(job)}>
-              {jobLabel(job)}
+            <p className="font-medium truncate min-w-0" title={job.url || jobLabel(job, clipMap)}>
+              {jobLabel(job, clipMap)}
             </p>
             {source && <span className="text-xs text-muted shrink-0">{source}</span>}
             {job.channel && <span className="text-xs text-muted shrink-0">· {job.channel}</span>}
           </div>
 
           {running && live && (
-            <div className="mt-1.5">
-              <div className="flex items-baseline gap-2 text-sm">
-                <span className="text-accent">{live.label || t('Starting…')}</span>
-                <span className="text-muted tabular-nums">
-                  {Math.round(live.fraction * 100)}%
+            <div className="mt-1.5 space-y-1">
+              <div className="flex items-baseline justify-between gap-2 text-sm flex-wrap">
+                <span className="text-accent font-medium">
+                  {job.type === 'render'
+                    ? 'Re-rendering 9:16 layout (FFmpeg)'
+                    : (live.label || t('Starting…'))}
                 </span>
-                {eta !== null && (
-                  <span className="text-muted tabular-nums">· {formatEta(eta)} {t('left')}</span>
-                )}
+                <div className="flex items-center gap-2 text-xs text-muted tabular-nums">
+                  <span className="font-semibold text-accent">{pct}%</span>
+                  <span>· {elapsed}s elapsed</span>
+                  {eta !== null && (
+                    <span>· ~{formatEta(eta)} {t('left')}</span>
+                  )}
+                </div>
               </div>
-              <div className="mt-1 h-1.5 rounded-full bg-raised overflow-hidden">
+              <div className="h-1.5 rounded-full bg-raised overflow-hidden">
                 <div
-                  className="h-full bg-accent transition-[width] duration-500"
-                  style={{ width: `${Math.round(live.fraction * 100)}%` }}
+                  className="h-full bg-accent transition-[width] duration-500 rounded-full"
+                  style={{ width: `${Math.max(2, pct)}%` }}
                 />
               </div>
             </div>
           )}
 
           {waiting && (
-            <p className="text-sm text-muted mt-0.5">
+            <p className="text-xs text-muted mt-0.5">
               {job.interrupted
                 ? t('Restarted after an interruption - resumes from its last finished stage')
-                : t('Waiting')}
+                : job.type === 'render'
+                  ? t('Waiting in batch · ~1m 23s est. render')
+                  : t('Waiting')}
             </p>
           )}
 

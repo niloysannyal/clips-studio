@@ -14,10 +14,12 @@ import { t } from '../lib/i18n'
  *  watermark can be placed off anything important. */
 function WatermarkOverlay({
   config,
-  onChange
+  onChange,
+  isEditing = false
 }: {
   config: WatermarkConfig
   onChange: (patch: Partial<WatermarkConfig>) => void
+  isEditing?: boolean
 }): JSX.Element {
   const boxRef = useRef<HTMLDivElement>(null)
   const [box, setBox] = useState({ w: 0, h: 0 })
@@ -124,12 +126,21 @@ function WatermarkOverlay({
       ) : (
         <div
           style={place(pos)}
-          className="pointer-events-auto cursor-move touch-none ring-1 ring-white/0 hover:ring-white/40 rounded"
+          className={`pointer-events-auto cursor-move touch-none rounded transition-all ${
+            isEditing
+              ? 'ring-2 ring-accent/70 bg-black/40 p-1 shadow-lg'
+              : 'ring-1 ring-white/0 hover:ring-white/40'
+          }`}
           onPointerDown={startDrag}
           onPointerMove={onMove}
           onPointerUp={() => (dragging.current = false)}
           title={t('Drag to reposition')}
         >
+          {isEditing && (
+            <span className="block text-[9px] text-accent font-semibold tracking-wide uppercase mb-0.5 text-center">
+              Watermark (Drag)
+            </span>
+          )}
           <Mark />
         </div>
       )}
@@ -152,17 +163,41 @@ export default function EditorView({
 }): JSX.Element {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [previewSrc, setPreviewSrc] = useState<string | null>(null)
+  const [clipVersion, setClipVersion] = useState(Date.now())
   const [watermark, setWatermark] = useState<WatermarkConfig | null>(clip.render_opts?.watermark ?? null)
+  const [activeEditorTab, setActiveEditorTab] = useState<string>('captions')
   const [liveOverlay, setLiveOverlay] = useState<LiveOverlay | null>(null)
-  const isLandscape = !!clip.render_opts?.profile
+  const [isLandscape, setIsLandscape] = useState(!!clip.render_opts?.profile)
+
+  const storedWatermark = clip.render_opts?.watermark ?? null
+  const isWatermarkDirty = JSON.stringify(watermark) !== JSON.stringify(storedWatermark)
+  const isWatermarkTab = activeEditorTab === 'watermark'
+  // Only show the live draggable overlay if:
+  // 1) The user is on the Watermark tab to interactively position it, OR
+  // 2) The watermark has pending unsaved edits (or the clip had no watermark baked in).
+  // Otherwise, the underlying video already has the watermark burned into the frames, so omit the duplicate.
+  const showWatermarkOverlay =
+    Boolean(watermark) &&
+    !previewSrc &&
+    (isWatermarkTab || isWatermarkDirty || !storedWatermark)
+
+  const reloadClip = (): void => {
+    setPreviewSrc(null)
+    setClipVersion(Date.now())
+    if (videoRef.current) {
+      videoRef.current.load()
+    }
+  }
 
   const [translated, setTranslated] = useState<TranslationPreview | null>(null)
 
   useEffect(() => {
     setPreviewSrc(null)
+    setClipVersion(Date.now())
     setWatermark(clip.render_opts?.watermark ?? null)
     setLiveOverlay(null)
     setTranslated(null)
+    setIsLandscape(!!clip.render_opts?.profile)
   }, [clip.id])
 
   /** What LiveTextOverlay draws. A translated language being previewed wins
@@ -258,19 +293,20 @@ export default function EditorView({
             }`}
           >
             <video
-              key={previewSrc ?? `clip-${clip.id}`}
+              key={previewSrc ? `preview-${previewSrc}` : `clip-${clip.id}-${clipVersion}`}
               ref={videoRef}
-              src={previewSrc ? `${API_BASE}${previewSrc}` : api.mediaUrl(clip.id)}
+              src={previewSrc ? `${API_BASE}${previewSrc}` : `${api.mediaUrl(clip.id)}?v=${clipVersion}`}
               controls
               autoPlay
               className="absolute inset-0 w-full h-full object-contain rounded-xl bg-base"
               aria-label={t('Editing preview')}
             />
-            {/* Live watermark overlay — hidden while a baked draft is shown. */}
-            {watermark && !previewSrc && (
+            {/* Live watermark overlay — only shown when editing on the Watermark tab or when edits are dirty. */}
+            {showWatermarkOverlay && watermark && (
               <WatermarkOverlay
                 config={watermark}
                 onChange={(patch) => setWatermark({ ...watermark, ...patch })}
+                isEditing={isWatermarkTab}
               />
             )}
             {/* Pending hook / caption text — or a translated language being
@@ -297,11 +333,15 @@ export default function EditorView({
             videoRef={videoRef}
             onChanged={onChanged}
             onPreview={setPreviewSrc}
+            onReloadClip={reloadClip}
             onLiveOverlay={setLiveOverlay}
             onTranslationPreview={setTranslated}
+            onActiveTabChange={setActiveEditorTab}
             watermark={watermark}
             setWatermark={setWatermark}
             tabRequest={tabRequest ?? undefined}
+            isLandscape={isLandscape}
+            setIsLandscape={setIsLandscape}
           />
         </div>
       </div>

@@ -269,6 +269,7 @@ export const api = {
       /** Hide or show an edit a plugin suggested. A suggestion is used by
        *  applying it, never here (plugins/edit_marks.py). */
       suggestion?: { id: string; state: 'hidden' | 'new' }
+      render_opts?: Partial<RenderOpts>
     }
   ) =>
     request<Clip>(`/clips/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
@@ -365,7 +366,9 @@ export const api = {
      *  ones, an empty list = none. */
     speakerEdits?: SpeakerTurn[],
     /** The pending Captions switch; undefined = the clip's saved choice. */
-    captions?: boolean
+    captions?: boolean,
+    clearProfile?: boolean,
+    profile?: string | null
   ) =>
     request<{ url: string }>(`/clips/${clipId}/preview`, {
       method: 'POST',
@@ -379,7 +382,9 @@ export const api = {
         gaming: gaming ?? null,
         gaming_off: gaming === null,
         speaker_edits: speakerEdits ?? null,
-        captions: captions ?? null
+        captions: captions ?? null,
+        clear_profile: clearProfile ?? false,
+        profile: profile ?? null
       })
     }),
   /** A frame of the clip's SOURCE video, `at` (0-1) of the way through, to

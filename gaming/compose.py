@@ -22,7 +22,7 @@ from pathlib import Path
 
 from core.binaries import ffmpeg
 from gaming.layout import OUT_H, OUT_W, Element, Plan
-from video.encoding import audio_filter_args, final_movflags, video_encoder_args
+from video.encoding import audio_filter_args, final_movflags, video_encoder_args, hwaccel_input_args
 
 
 def _blur_fill(label: str, w: int, h: int) -> str:
@@ -83,13 +83,14 @@ def filter_graph(p: Plan, vf_extra: str = "", ass_name: str | None = None) -> st
 
 
 def render(clip_path: Path, output_path: Path, p: Plan, ass_path: Path | None = None,
-           vf_extra: str = "", normalize: bool = True) -> Path:
+           vf_extra: str = "", normalize: bool = True, is_preview: bool = False) -> Path:
     cmd = [
         ffmpeg(), "-y",
+        *hwaccel_input_args(),
         "-i", str(clip_path.resolve()),
         "-filter_complex", filter_graph(p, vf_extra, ass_path.name if ass_path is not None else None),
         "-map", "[v]", "-map", "0:a:0?",
-        *video_encoder_args(),
+        *video_encoder_args(preview=is_preview),
         "-c:a", "aac", "-b:a", "128k",
         *audio_filter_args(normalize),
         "-fps_mode", "cfr",

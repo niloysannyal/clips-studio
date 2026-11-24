@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Agentation } from 'agentation'
 import Dashboard from './pages/Dashboard'
 import ClipStudio from './pages/ClipStudio'
 import Creators from './pages/Creators'
@@ -251,6 +252,9 @@ export default function App(): JSX.Element {
             setPage('studio')
           }}
         />
+      )}
+      {(import.meta.env.DEV || process.env.NODE_ENV === 'development') && (
+        <Agentation endpoint="http://localhost:4747" appName="Clips Kitty Studio" />
       )}
     </div></ClipUpdatesProvider>
   )

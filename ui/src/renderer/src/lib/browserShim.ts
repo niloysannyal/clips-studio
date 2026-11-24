@@ -48,8 +48,11 @@ export function installBrowserShim(): void {
     // which is the same thing an empty clipboard means.
     readClipboardKey: async () => '',
     pickImageFile: async () => {
-      unavailable('Choosing an image')
-      return null
+      const p = window.prompt(
+        'Enter image path on this computer (e.g. D:\\autoclip-data\\Code_Generated_Image.png):',
+        'D:\\autoclip-data\\Code_Generated_Image.png'
+      )
+      return p ? p.trim() : null
     },
     pickFolder: async () => {
       unavailable('Choosing a folder')

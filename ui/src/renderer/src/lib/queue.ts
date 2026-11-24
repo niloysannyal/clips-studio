@@ -1,4 +1,4 @@
-import type { JobOptions, QueueJob, QueueSnapshot } from './types'
+import type { Clip, JobOptions, QueueJob, QueueSnapshot } from './types'
 import type { JobProgress } from './jobProgress'
 import { etaSeconds } from './jobProgress'
 import { describeSport } from './sports'
@@ -15,9 +15,21 @@ import { describeSport } from './sports'
  *  download names the video — and for jobs queued before this feature
  *  existed. The URL is the honest fallback; inventing a name would be worse
  *  than showing the thing the user actually pasted. */
-export function jobLabel(job: QueueJob): string {
+export function jobLabel(job: QueueJob, clipMap?: Map<number, Clip>): string {
+  if (job.type === 'render') {
+    const clipId = job.settings?.clip_id
+    if (clipId) {
+      const clip = clipMap?.get(clipId)
+      if (clip) {
+        const dur = Math.round(clip.end_s - clip.start_s)
+        const title = clip.title || clip.hook || `Clip #${clipId}`
+        return `Clip #${clipId}: "${title}" (${dur}s)`
+      }
+      return `Clip #${clipId} (Re-rendering 9:16)`
+    }
+    return 'Re-rendering a clip'
+  }
   if (job.display_title) return job.display_title
-  if (job.type === 'render') return 'Re-rendering a clip'
   if (job.type === 'translate') return 'Subtitles & dubbing'
   if (!job.url) return `Job ${job.id}`
   if (job.url.startsWith('local:')) return 'Local video file'
@@ -75,7 +87,45 @@ export function describeOptions(o: JobOptions | undefined): string[] {
   if (typeof o.min_score === 'number') chips.push(`Score ≥ ${o.min_score}`)
   if (o.focus) chips.push(`Direction · ${o.focus.length > 40 ? `${o.focus.slice(0, 40)}…` : o.focus}`)
   if (o.force) chips.push('Reprocess')
+  if (o.clip_id) {
+    chips.push('9:16 Re-render')
+    const gaming = (o as any).render_opts?.gaming
+    if (gaming?.preset) {
+      chips.push(`Layout · ${gaming.preset}`)
+    }
+  }
   return chips
+}
+
+export interface QueueCounts {
+  total: number
+  renders: number
+  processes: number
+  translates: number
+  summary: string
+}
+
+export function queueCounts(snapshot: QueueSnapshot | null): QueueCounts {
+  if (!snapshot) return { total: 0, renders: 0, processes: 0, translates: 0, summary: '0 videos remaining' }
+  const allActive = [...snapshot.processing, ...snapshot.queued]
+  let renders = 0
+  let processes = 0
+  let translates = 0
+  for (const j of allActive) {
+    if (j.type === 'render') renders++
+    else if (j.type === 'translate') translates++
+    else processes++
+  }
+  const total = allActive.length
+  let summary = ''
+  if (processes === 0 && renders > 0) {
+    summary = `${renders} ${renders === 1 ? 'clip remaining' : 'clips remaining'}`
+  } else if (processes > 0 && renders > 0) {
+    summary = `${processes} ${processes === 1 ? 'video' : 'videos'}, ${renders} ${renders === 1 ? 'clip' : 'clips'} remaining`
+  } else {
+    summary = `${total} ${total === 1 ? 'video remaining' : 'videos remaining'}`
+  }
+  return { total, renders, processes, translates, summary }
 }
 
 /** Seconds until the whole queue is done.
@@ -91,12 +141,34 @@ export function queueEta(
   now: number
 ): number | null {
   if (!snapshot) return null
-  const waiting = snapshot.estimate.queued_seconds
-  const running = snapshot.processing.length > 0
-  if (!running) return waiting > 0 ? waiting : null
-  const fromProgress = etaSeconds(live, now)
-  const current = fromProgress ?? snapshot.estimate.per_video_seconds
-  return waiting + current
+  const running = snapshot.processing
+  const queued = snapshot.queued
+  if (running.length === 0 && queued.length === 0) return null
+
+  let totalSeconds = 0
+  // Queued jobs
+  for (const job of queued) {
+    if (job.type === 'render') {
+      totalSeconds += 83
+    } else if (job.type === 'translate') {
+      totalSeconds += 60
+    } else {
+      totalSeconds += snapshot.estimate.per_video_seconds || 3600
+    }
+  }
+
+  // Running jobs
+  for (const job of running) {
+    if (job.type === 'render') {
+      const fromProgress = etaSeconds(live, now)
+      totalSeconds += fromProgress !== null ? fromProgress : 83
+    } else {
+      const fromProgress = etaSeconds(live, now)
+      totalSeconds += fromProgress ?? (snapshot.estimate.per_video_seconds || 3600)
+    }
+  }
+
+  return Math.round(totalSeconds)
 }
 
 /** "2h 47m" / "18m" / "45s". Coarser than the per-clip timer on purpose:

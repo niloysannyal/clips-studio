@@ -49,8 +49,8 @@ function relaxCspForBrowserDev(): Plugin {
             "default-src 'self'; " +
             // Fast Refresh preamble.
             "script-src 'self' 'unsafe-inline'; " +
-            // The engine, plus Vite's own HMR socket on this origin.
-            "connect-src 'self' ws: http://127.0.0.1:8765 ws://127.0.0.1:8765; " +
+            // The engine, plus Vite's own HMR socket on this origin, and Agentation local MCP.
+            "connect-src 'self' ws: http://127.0.0.1:8765 ws://127.0.0.1:8765 http://localhost:4747 http://127.0.0.1:4747 ws://localhost:4747 ws://127.0.0.1:4747; " +
             'media-src http://127.0.0.1:8765; ' +
             "style-src 'self' 'unsafe-inline'\" />"
         )

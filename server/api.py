@@ -164,6 +164,7 @@ class ClipPatch(BaseModel):
     # Hide or show an edit a plugin suggested: {"id", "state": "hidden" | "new"}
     # (plugins/edit_marks.py). A suggestion is used by applying it, never here.
     suggestion: dict | None = None
+    render_opts: dict | None = None
 
 
 class MergeIn(BaseModel):
@@ -196,6 +197,8 @@ class PreviewIn(BaseModel):
     speaker_edits: list | None = None
     # pending Captions on/off switch; None keeps the clip's saved choice
     captions: bool | None = None
+    clear_profile: bool = False
+    profile: str | None = None
 
 
 class CreatorGamingLayoutIn(BaseModel):
@@ -1695,6 +1698,10 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                 fields["exported_at"] = _now()
             if body.suggestion is not None:
                 fields["scores"] = _suggestion_state(row, body.suggestion)
+            if body.render_opts is not None:
+                cur_opts = json.loads(row["render_opts"]) if row["render_opts"] else {}
+                cur_opts.update(body.render_opts)
+                fields["render_opts"] = json.dumps(_clean_render_gaming(cur_opts))
             if fields:
                 d.set_clip(clip_id, **fields)
             return _clip_json(d.get_clip(clip_id))
@@ -1951,6 +1958,10 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             opts["speaker_edits"] = body.speaker_edits
         if body.captions is not None:
             opts["captions"] = body.captions
+        if body.clear_profile or (body.gaming is not None and not body.gaming_off):
+            opts.pop("profile", None)
+        elif body.profile is not None:
+            opts["profile"] = body.profile
 
         candidate = ClipCandidate(
             start=row["start_s"], end=row["end_s"],
@@ -1969,7 +1980,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
             content_lang = detected_language(row["video_id"], data_dir / "transcripts")
             rendered, _ = _render_files(
-                source, candidate, segments, prev_dir, config, opts, content_lang
+                source, candidate, segments, prev_dir, config, opts, content_lang, is_preview=True
             )
             # The last preview may still be playing in the editor: Windows
             # refuses deleting or renaming over it (#137), so put the new one

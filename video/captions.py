@@ -18,13 +18,13 @@ from pathlib import Path
 from core.models import ClipCandidate, Segment
 
 DEFAULT_STYLE = {
-    "font": "Arial",          # must be in FONTS (installed on stock Windows)
+    "font": "Impact",          # must be in FONTS (installed on stock Windows)
     "font_size": 84,          # at 1080x1920 playback resolution
     "color": "#FFFFFF",       # text colour (hex RGB)
     "position": "bottom",     # bottom | middle | top
-    "words_per_caption": 3,
+    "words_per_caption": 2,
     "uppercase": True,
-    "highlight": False,           # light up each word as it is spoken
+    "highlight": True,           # light up each word as it is spoken
     "highlight_color": "#FFE600",
     "second_speaker": False,      # another colour when it isn't the main speaker talking (#126)
     "second_speaker_color": "#5CE1FF",
@@ -81,7 +81,7 @@ def caption_font_for(language: str, chosen: str | None) -> str | None:
     return chosen
 
 # position -> (ASS numpad alignment, vertical margin)
-_POSITIONS = {"bottom": (2, 440), "middle": (5, 0), "top": (8, 140)}
+_POSITIONS = {"bottom": (2, 300), "middle": (5, 0), "top": (8, 140)}
 
 
 def build_caption_lines(
@@ -491,6 +491,11 @@ def build_captions(
         else None
     )
 
+    pos_tag = ""
+    if opts.get("caption_y") is not None or opts.get("y_percent") is not None:
+        cy = float(opts.get("caption_y") if opts.get("caption_y") is not None else opts.get("y_percent"))
+        pos_tag = f"{{\\an5\\pos({canvas[0] // 2},{round(cy * canvas[1])})}}"
+
     dialogue = []
     for line in lines:
         text = str(line.get("text", "")).strip()
@@ -504,10 +509,10 @@ def build_captions(
             continue
         tint = second if second and line.get("speaker") else None
         if opts.get("highlight"):
-            dialogue.extend(_highlighted(text, start, end, spoken, opts, tint))
+            dialogue.extend(_highlighted(text, start, end, spoken, opts, tint, pos_tag))
         else:
             dialogue.append(
-                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{_tinted(text, tint)}"
+                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{pos_tag}{_tinted(text, tint)}"
             )
 
     if not dialogue:
@@ -548,7 +553,7 @@ def _tinted(text: str, tint: str | None) -> str:
 
 
 def _highlighted(
-    text: str, start: float, end: float, spoken: list[dict], opts: dict, tint: str | None = None
+    text: str, start: float, end: float, spoken: list[dict], opts: dict, tint: str | None = None, pos_tag: str = ""
 ) -> list[str]:
     """One Dialogue per word: the whole caption, with the word being spoken
     in the highlight colour. `tint` is the caption's own colour when it is
@@ -561,7 +566,7 @@ def _highlighted(
     tokens = text.split()
     times = _word_times(text, start, end, spoken)
     if len(tokens) < 2 or not times:
-        return [f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{_tinted(text, tint)}"]
+        return [f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{pos_tag}{_tinted(text, tint)}"]
 
     base = tint or _inline_color(opts["color"])
     hot = _inline_color(opts.get("highlight_color", DEFAULT_STYLE["highlight_color"]))
@@ -579,15 +584,19 @@ def _highlighted(
         )
         events.append(
             f"Dialogue: 0,{_ass_time(seg_start)},{_ass_time(seg_end)},Default,,0,0,0,,"
-            f"{{\\1c{base}}}{body}"
+            f"{pos_tag}{{\\1c{base}}}{body}"
         )
     return events
 
 
 def _header(opts: dict, canvas: tuple[int, int] = (1080, 1920)) -> str:
-    alignment, margin_v = _POSITIONS.get(opts["position"], _POSITIONS["bottom"])
-    color = _ass_color(opts["color"])
-    size = max(40, min(140, int(opts["font_size"])))
+    if opts.get("caption_y") is not None or opts.get("y_percent") is not None:
+        alignment = 5
+        margin_v = 0
+    else:
+        alignment, margin_v = _POSITIONS.get(opts.get("position", "bottom"), _POSITIONS["bottom"])
+    color = _ass_color(opts.get("color", "#FFFFFF"))
+    size = max(40, min(140, int(opts.get("font_size", 84))))
     font = opts.get("font") if opts.get("font") in FONTS else "Arial"
     # Style values are calibrated for the 1920-tall Shorts canvas; scale
     # them to whatever frame this clip renders at (e.g. landscape 1080).

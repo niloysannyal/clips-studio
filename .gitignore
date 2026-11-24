@@ -287,3 +287,14 @@ _test_*.py
 /media.txt
 /seg.ts
 *.ts.tmp
+
+# Local agency & runtime files
+clips_kitty.db
+queue/
+logs/
+scratch/
+.agents/
+context/
+GEMINI.md
+*.pdf
+

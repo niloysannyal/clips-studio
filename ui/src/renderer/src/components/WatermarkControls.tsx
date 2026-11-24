@@ -24,13 +24,14 @@ const POSITIONS: {
 ]
 
 export const DEFAULT_WATERMARK: WatermarkConfig = {
-  type: 'text',
+  type: 'image',
+  image_asset: '28b4dc654df23460.png',
   text: '@YourChannel',
   font: 'Arial Black',
   font_size: 42,
   color: '#FFFFFF',
   opacity: 0.85,
-  position: 'bottom_right',
+  position: 'top_right',
   padding: 0.04,
   scale: 0.18,
   rotation: 0,
@@ -137,11 +138,19 @@ export default function WatermarkControls({
   const withText = config.type === 'text' || config.type === 'both'
 
   const upload = async (): Promise<void> => {
-    const path = await window.studio.pickImageFile()
-    if (!path) return
+    let path: string | null = null
     try {
+      if (window.studio && window.studio.platform !== 'browser' && window.studio.pickImageFile) {
+        path = await window.studio.pickImageFile()
+      } else {
+        path = window.prompt(
+          'Enter absolute path to logo image (PNG/JPG/WebP) on this machine:',
+          'D:\\autoclip-data\\Code_Generated_Image.png'
+        )
+      }
+      if (!path) return
       const { asset } = await api.uploadBrandingAsset(path)
-      onChange({ image_asset: asset })
+      onChange({ image_asset: asset, type: config.type === 'text' ? 'both' : config.type || 'image' })
     } catch (e) {
       alert(`Couldn't add that image: ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -166,12 +175,30 @@ export default function WatermarkControls({
         </div>
 
         {withImage && (
-          <div className="flex items-center gap-2 text-xs">
-            <button className="bg-raised px-2.5 py-1.5 rounded-md hover:bg-raised/70" onClick={upload}>
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            <button className="bg-raised px-2.5 py-1.5 rounded-md hover:bg-raised/70 flex items-center" onClick={upload}>
               <Folder className="mr-1.5" />
               {config.image_asset ? 'Replace logo' : 'Upload logo (PNG)'}
             </button>
-            {config.image_asset && <span className="text-muted truncate">✓ logo added</span>}
+            <button
+              type="button"
+              className="bg-accent/20 text-accent border border-accent/40 px-2.5 py-1.5 rounded-md hover:bg-accent/30 font-medium"
+              onClick={() =>
+                onChange({
+                  image_asset: '28b4dc654df23460.png',
+                  type: config.type === 'text' ? 'both' : config.type || 'image',
+                  position: config.position ?? 'top_right'
+                })
+              }
+              title="Use D:\autoclip-data\Code_Generated_Image.png"
+            >
+              ⚡ Use Code_Generated_Image.png
+            </button>
+            {config.image_asset && (
+              <span className="text-emerald-400 font-medium truncate">
+                ✓ {config.image_asset === '28b4dc654df23460.png' ? 'Default Logo Active' : 'Logo added'}
+              </span>
+            )}
           </div>
         )}
 
