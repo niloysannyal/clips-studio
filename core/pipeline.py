@@ -822,7 +822,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         banner = hook_banners[idx] if idx < len(hook_banners) else ""
         if banner and not ((opts or {}).get("edit") or {}).get("hook"):
             existing_edit = dict((opts or {}).get("edit") or {})
-            existing_edit["hook"] = {"text": banner, "seconds": min(3.5, max(1.0, candidate.duration))}
+            existing_edit["hook"] = {"text": banner, "seconds": round(max(1.0, candidate.duration), 2)}
             opts = {**(opts or {}), "edit": existing_edit}
         return opts
 
@@ -1775,9 +1775,17 @@ def _render_files(
     ass_path = None
     # Per-clip style wins; otherwise the job/config default chosen at generate time.
     caption_style = _plain_caption_style(opts.get("caption_style") or config["clips"].get("caption_style"))
+    explicit_caption_y = bool(
+        isinstance(caption_style, dict)
+        and (caption_style.get("caption_y") is not None or caption_style.get("y_percent") is not None)
+    )
     if opts.get("gaming") and isinstance(opts["gaming"], dict) and opts["gaming"].get("caption_y") is not None:
         caption_style = dict(caption_style or {})
         caption_style["caption_y"] = opts["gaming"]["caption_y"]
+        explicit_caption_y = True
+    elif not explicit_caption_y and isinstance(opts.get("gaming"), dict) and opts["gaming"].get("layout") == "split":
+        caption_style = dict(caption_style or {})
+        caption_style["caption_y"] = 0.44
     # Where someone other than the main speaker talks, when the caption style
     # asks for them in a second colour (#126). Empty for every other clip.
     turns: list = []
@@ -1895,7 +1903,14 @@ def _render_files(
                 intermediate = edited
 
             if gaming:
-                gaming_kept = _try_gaming_render(intermediate, render_path, opts, config,
+                g_opts = {
+                    **opts,
+                    "gaming": {
+                        **(opts.get("gaming") if isinstance(opts.get("gaming"), dict) else {}),
+                        **({"_caption_y_explicit": True} if explicit_caption_y else {}),
+                    },
+                }
+                gaming_kept = _try_gaming_render(intermediate, render_path, g_opts, config,
                                                  ass_path, vf_extra, normalize, is_preview=is_preview)
             if gaming_kept is not None:
                 pass  # rendered in the gaming layout (split or game only)
@@ -2005,8 +2020,13 @@ def _render_files(
         discard(ass_path)
 
     # Image watermark: one overlay pass on the finished clip (only when set).
-    if wm_cfg and _wm.has_image(wm_cfg, wm_assets):
-        _wm.apply_image(render_path, wm_cfg, canvas, wm_assets)
+    wm_layout = (gaming_kept or {}).get("layout") or (
+        opts["gaming"].get("layout") if isinstance(opts.get("gaming"), dict) else None
+    )
+    if wm_cfg and _wm.has_image(wm_cfg, wm_assets, layout=wm_layout):
+        _wm.apply_image(render_path, wm_cfg, canvas, wm_assets, layout=wm_layout)
+    if (gaming_kept or {}).get("caption_y") is not None and not explicit_caption_y:
+        caption_style = {**(caption_style or {}), "caption_y": gaming_kept["caption_y"]}
 
     # Writes final_path complete, with the card. Never raises and never loses
     # the clip: if the card cannot be made it still writes final_path without

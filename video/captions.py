@@ -725,3 +725,32 @@ def _ass_time(seconds: float) -> str:
     m = int(seconds % 3600 // 60)
     s = seconds % 60
     return f"{h}:{m:02d}:{s:05.2f}"
+
+
+def reposition_ass_captions(
+    ass_path: Path,
+    caption_y: float,
+    canvas: tuple[int, int] = (1080, 1920),
+) -> None:
+    """Reposition Default caption dialogue lines in an ASS file to normalized `caption_y`
+    without disturbing Hook (Layer 1) or Watermark (Layer 2) events."""
+    if not ass_path.exists():
+        return
+    pos_tag = f"{{\\an5\\pos({canvas[0] // 2},{round(float(caption_y) * canvas[1])})}}"
+    lines = ass_path.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    pos_re = re.compile(r"\{\\an\d+\\pos\([^)]+\)\}")
+    for line in lines:
+        if line.startswith("Style: Default,"):
+            parts = line.split(",")
+            if len(parts) >= 23:
+                parts[18] = "5"   # Alignment = center
+                parts[21] = "0"   # MarginV = 0
+                line = ",".join(parts)
+        elif line.startswith("Dialogue: 0,") and ",Default," in line:
+            head, sep, body = line.partition(",,0,0,0,,")
+            if sep:
+                body = pos_re.sub("", body)
+                line = f"{head}{sep}{pos_tag}{body}"
+        out.append(line)
+    ass_path.write_text("\n".join(out) + "\n", encoding="utf-8")

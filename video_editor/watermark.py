@@ -71,26 +71,36 @@ WATERMARK_PRESETS: dict[str, dict] = {
         "opacity": 0.45,
         "scale": 0.24,
     },
+    "split_seam_center": {
+        "position": "custom",
+        "x": 0.50,
+        "y": 0.355,
+        "opacity": 0.55,
+        "scale": 0.22,
+    },
 }
 
 
-def resolve_config(cfg: dict) -> dict:
-    """Expand named presets (e.g. 'safe_top_center') into explicit coordinates."""
+def resolve_config(cfg: dict, layout: str | None = None) -> dict:
+    """Expand named presets into explicit coordinates, shifting safe_top_center
+    onto the split seam (y=0.355) when layout == 'split' to avoid facecam overlap."""
     if not isinstance(cfg, dict):
         return {}
     pos = cfg.get("position")
+    if pos == "safe_top_center" and layout == "split":
+        return {**cfg, **WATERMARK_PRESETS["split_seam_center"]}
     if isinstance(pos, str) and pos in WATERMARK_PRESETS:
         return {**cfg, **WATERMARK_PRESETS[pos]}
     return cfg
 
 
-def has_text(cfg: dict) -> bool:
-    cfg = resolve_config(cfg)
+def has_text(cfg: dict, layout: str | None = None) -> bool:
+    cfg = resolve_config(cfg, layout=layout)
     return cfg.get("type") in ("text", "both") and bool(str(cfg.get("text", "")).strip())
 
 
-def has_image(cfg: dict, asset_dir: Path) -> bool:
-    cfg = resolve_config(cfg)
+def has_image(cfg: dict, asset_dir: Path, layout: str | None = None) -> bool:
+    cfg = resolve_config(cfg, layout=layout)
     co = cfg.get("campaign_overlay")
     if isinstance(co, dict) and co.get("path") and Path(str(co["path"])).is_file():
         return True
@@ -197,11 +207,12 @@ def ensure_text(
     cfg: dict,
     canvas: tuple[int, int],
     duration: float = 0.0,
+    layout: str | None = None,
 ) -> Path:
     """Merge the watermark text into the clip's ASS file (or write a
     standalone one). Static by default; 'moving' position hops it around the
     edges (TikTok-style, anti-crop). Returns the ASS file to burn."""
-    cfg = resolve_config(cfg)
+    cfg = resolve_config(cfg, layout=layout)
     text = str(cfg["text"]).replace("\\", "").replace("{", "").replace("}", "").strip()
     style = _text_style(cfg, canvas)
     event = _text_events(text, cfg, duration, canvas)
@@ -235,10 +246,16 @@ def _campaign_overlay_path(cfg: dict) -> Path | None:
     return p if p.is_file() else None
 
 
-def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir: Path) -> None:
+def apply_image(
+    video_path: Path,
+    cfg: dict,
+    canvas: tuple[int, int],
+    asset_dir: Path,
+    layout: str | None = None,
+) -> None:
     """Overlay the logo and/or optional campaign overlay onto the video IN PLACE.
     One extra encode; runs only when an image watermark or campaign_overlay is set."""
-    cfg = resolve_config(cfg)
+    cfg = resolve_config(cfg, layout=layout)
     w, h = canvas
 
     logo: Path | None = None

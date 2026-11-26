@@ -11,11 +11,13 @@ from pathlib import Path
 
 
 def _hook_style(canvas: tuple[int, int], font: str = "Arial Black") -> str:
-    # Top safe-zone pill banner (y ≈ H * 0.08): bold uppercase over a dark pill backdrop.
+    # Top safe-zone pill banner (y ≈ H * 0.055): bold uppercase over a dark opaque pill backdrop.
     s = canvas[1] / 1920
+    pad = max(8, round(14 * s))
+    margin_v = round(105 * s)
     return (
-        f"Style: Hook,{font},{round(72 * s)},&H00FFFFFF,&H00FFFFFF,&H99000000,"
-        f"&H99000000,-1,0,0,0,100,100,0,0,3,{max(6, round(14 * s))},0,8,60,60,{round(150 * s)},1"
+        f"Style: Hook,{font},{round(64 * s)},&H00FFFFFF,&H00FFFFFF,&H40000000,"
+        f"&H40000000,-1,0,0,0,100,100,0,0,3,{pad},0,8,60,60,{margin_v},1"
     )
 
 
@@ -41,9 +43,11 @@ def _ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def _hook_event(text: str, seconds: float) -> str:
+def _hook_event(text: str, seconds: float, canvas: tuple[int, int] = (1080, 1920)) -> str:
     clean = text.replace("\\", "").replace("{", "").replace("}", "").strip().upper()
-    return f"Dialogue: 1,{_ass_time(0)},{_ass_time(seconds)},Hook,,0,0,0,,{clean}"
+    pad = max(8, round(14 * (canvas[1] / 1920)))
+    pill = f"{{\\3c&H000000&\\4c&H000000&\\3a&H40&\\4a&H40&\\bord{pad}\\shad0}}"
+    return f"Dialogue: 1,{_ass_time(0)},{_ass_time(seconds)},Hook,,0,0,0,,{pill}{clean}"
 
 
 def ensure_hook(
@@ -59,16 +63,17 @@ def ensure_hook(
     font: override for non-Latin content (see video.captions.SCRIPT_FONTS)."""
     text, seconds = hook["text"], float(hook["seconds"])
     style = _hook_style(canvas, font)
+    event = _hook_event(text, seconds, canvas=canvas)
     if ass_path is not None and ass_path.exists():
         content = ass_path.read_text(encoding="utf-8")
         # Style goes right before the [Events] section; event goes at the end.
         content = content.replace("\n[Events]", f"\n{style}\n\n[Events]", 1)
-        content = content.rstrip("\n") + "\n" + _hook_event(text, seconds) + "\n"
+        content = content.rstrip("\n") + "\n" + event + "\n"
         ass_path.write_text(content, encoding="utf-8")
         return ass_path
     target.write_text(
         _MINIMAL_HEADER.format(w=canvas[0], h=canvas[1], style=style)
-        + _hook_event(text, seconds)
+        + event
         + "\n",
         encoding="utf-8",
     )

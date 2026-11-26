@@ -241,12 +241,26 @@ def render(intermediate: Path, output: Path, g: dict, config: dict, ass_path: Pa
             if head is not None:
                 heads[role] = head
     p = layout.plan(src_w, src_h, settings, heads)
+    default_split_cy = None
+    if (
+        p.kind == "split"
+        and settings.get("caption_y") is None
+        and not settings.get("_caption_y_explicit")
+        and ass_path is not None
+        and ass_path.exists()
+    ):
+        from video.captions import reposition_ass_captions
+
+        default_split_cy = 0.44
+        reposition_ass_captions(ass_path, default_split_cy, (layout.OUT_W, layout.OUT_H))
     compose.render(intermediate, output, p, ass_path=ass_path, vf_extra=vf_extra, normalize=normalize, is_preview=is_preview)
     face = None
     cam_el = p.element("cam")
     if cam_el is not None and "cam" in heads:
         face = framing.face_clear(heads["cam"], cam_el.src, cam_el.dest, cam_el.shift,
                                   framing.safe_zone(p.safe))
-    return {**(settings if whole else g), "layout": p.kind, "used_preset": p.preset,
+    kept_base = {k: v for k, v in (settings if whole else g).items() if k != "_caption_y_explicit"}
+    return {**kept_base, "layout": p.kind, "used_preset": p.preset,
             "used_cam": [round(v, 4) for v in use] if use else None,
+            **({"caption_y": default_split_cy} if default_split_cy is not None else {}),
             **({"face": face} if face is not None else {})}
