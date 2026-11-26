@@ -867,11 +867,16 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         try:
             from publish.wantedfeed_packager import build_package, write_package_files
 
+            parsed_opts = json.loads(render_opts_json) if render_opts_json else {}
+            rendered_hook = ((parsed_opts.get("edit") or {}).get("hook") or {}).get("text") or ""
+            pkg_hook = rendered_hook or (
+                "" if (getattr(candidate, "hook", "") or "") == "Creator reaction" else getattr(candidate, "hook", "")
+            )
             pkg = build_package(
                 clip_path=final_path,
                 channel_name=getattr(video, "channel", "") or "",
                 title=getattr(meta, "title", "") or getattr(video, "title", "") or final_path.stem,
-                hook_text=getattr(candidate, "hook", "") or "",
+                hook_text=pkg_hook,
                 summary=getattr(meta, "description", "") or "",
                 duration_s=seconds,
                 platform_hint=source_name,

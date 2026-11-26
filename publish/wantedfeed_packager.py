@@ -25,6 +25,12 @@ _EXTRA_HANDLES = {
     "caseoh": ("CaseOh", "Twitch"),
     "lacy": ("Lacy", "Twitch"),
     "ohnepixel": ("ohnePixel", "Twitch"),
+    "foltyn": ("Foltyn", "YouTube"),
+    "foltyngaming": ("Foltyn", "YouTube"),
+    "foltyngaming3": ("Foltyn", "YouTube"),
+    "foltynfamily": ("Foltyn", "YouTube"),
+    "klfoltyn": ("Foltyn", "YouTube"),
+    "realfoltyn": ("Foltyn", "YouTube"),
 }
 
 _FB_DISCOVERY_TAGS = [
@@ -62,11 +68,11 @@ def resolve_streamer(channel_name: str, platform_hint: str = "", watchlist_path:
             }
     if lowered in _EXTRA_HANDLES:
         name, plat = _EXTRA_HANDLES[lowered]
-        handle = re.sub(r"[^A-Za-z0-9_.]", "", name)
+        handle = "FoltynFamily" if name == "Foltyn" else re.sub(r"[^A-Za-z0-9_.]", "", name)
         return {
             "name": name,
             "handle": handle,
-            "tag": handle.lower(),
+            "tag": name.lower(),
             "platform": platform_hint or plat,
             "credit_line": f"Credit: @{handle} on {platform_hint or plat}",
         }
@@ -495,27 +501,51 @@ def build_package(
     ]
     hook_line = (hook_text or title or "Wait until the ending in GTA 6!").strip()
     summary_line = (summary or f"{streamer['name']} pulled off one of the wildest moments in GTA 6.").strip()
-    debate_q = f"Would you survive what {streamer['name']} just did in GTA 6? Drop your take!"
+    debate_q = f"Would you survive what {streamer['name']} just did in GTA 6? Drop your take! 👇"
     credit = streamer["credit_line"]
+    is_foltyn = streamer["name"].lower() == "foltyn"
 
-    meta_caption = (
-        f"{hook_line}\n\n"
-        f"{debate_q}\n\n"
-        f"{credit}\n"
-        f"{' '.join(locked_meta_tags)}"
-    )
-    yt_desc = (
-        f"{summary_line}\n\n"
-        f"{credit}\n"
-        f"#GTA6 #{streamer['tag']} #Shorts"
-    )
-    tiktok_caption = (
-        f"{hook_line} {credit} #gta6 #{streamer['tag']} #gta6clips #gamingclips #wantedfeed"
-    )
-    threads_p1 = f"{hook_line}\n\n{summary_line}\n{credit}"
-    threads_p2 = f"Rate this GTA 6 clip from 1 to 10 — could you pull this off?"
+    if is_foltyn:
+        foltyn_debate = "Could YOU pull off this GTA 6 move? Rate Foltyn 1-10 below! 👇"
+        meta_caption = (
+            f"@realfoltyn {hook_line}\n\n"
+            f"{foltyn_debate}\n\n"
+            f"{credit}\n"
+            f"{' '.join(locked_meta_tags)}"
+        )
+        yt_desc = (
+            f"@FoltynFamily {hook_line}\n\n"
+            f"{summary_line}\n\n"
+            f"{foltyn_debate}\n\n"
+            f"{credit}\n"
+            f"#GTA6 #{streamer['tag']} #Shorts"
+        )
+        tiktok_caption = (
+            f"@klfoltyn {hook_line}\n"
+            f"{foltyn_debate} {credit} #gta6 #{streamer['tag']} #gta6clips #gamingclips #wantedfeed"
+        )
+        threads_p1 = f"{hook_line}\n\n{summary_line}\n{credit}"
+        threads_p2 = f"Rate this Foltyn GTA 6 W from 1 to 10! 👇"
+        x_copy_raw = f"{hook_line} — Foltyn goes crazy in GTA 6! {foltyn_debate} {credit} #GTA6 #WantedFeed"
+    else:
+        meta_caption = (
+            f"{hook_line}\n\n"
+            f"{debate_q}\n\n"
+            f"{credit}\n"
+            f"{' '.join(locked_meta_tags)}"
+        )
+        yt_desc = (
+            f"{summary_line}\n\n"
+            f"{credit}\n"
+            f"#GTA6 #{streamer['tag']} #Shorts"
+        )
+        tiktok_caption = (
+            f"{hook_line} {credit} #gta6 #{streamer['tag']} #gta6clips #gamingclips #wantedfeed"
+        )
+        threads_p1 = f"{hook_line}\n\n{summary_line}\n{credit}"
+        threads_p2 = f"Rate this GTA 6 clip from 1 to 10 — could you pull this off?"
+        x_copy_raw = f"{hook_line} — {streamer['name']} in GTA 6. {credit} #GTA6 #WantedFeed"
 
-    x_copy_raw = f"{hook_line} — {streamer['name']} in GTA 6. {credit} #GTA6 #WantedFeed"
     x_copy = _VIDEO_URL_RE.sub("", x_copy_raw).strip()
 
     schedule = schedule_slot_bst(streamer["name"], csv_path=tracker_path)

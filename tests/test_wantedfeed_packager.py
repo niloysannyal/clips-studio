@@ -86,6 +86,25 @@ class WantedFeedPackagerTests(unittest.TestCase):
         self.assertNotIn("AFTER 52 HOURS", pkg["titles"]["pattern_2_mechanic"])
         self.assertNotIn("AFTER 52 HOURS", pkg["titles"]["pattern_3_contrast"])
 
+    def test_foltyn_bounty_first_line_tags_and_cta(self) -> None:
+        pkg = wf.build_package(
+            clip_path=Path("foltyn_demo.mp4"),
+            channel_name="FoltynGaming",
+            title="Busting 33 Myths In GTA 6!",
+            hook_text="FOLTYN TESTED THIS MYTH",
+            summary="Foltyn pulls off an insane stunt test in GTA 6.",
+            duration_s=28.0,
+            platform_hint="YouTube",
+        )
+        self.assertTrue(pkg["platforms"]["tiktok"]["caption"].startswith("@klfoltyn "))
+        self.assertTrue(pkg["platforms"]["youtube_shorts"]["description"].startswith("@FoltynFamily "))
+        self.assertTrue(pkg["platforms"]["meta_reels"]["caption"].startswith("@realfoltyn "))
+        self.assertIn("👇", pkg["platforms"]["tiktok"]["caption"])
+        self.assertIn("👇", pkg["platforms"]["youtube_shorts"]["description"])
+        self.assertIn("👇", pkg["platforms"]["meta_reels"]["caption"])
+        self.assertIn("👇", pkg["platforms"]["x"]["caption"])
+        self.assertIn("Credit: @FoltynFamily on YouTube", pkg["platforms"]["meta_reels"]["caption"])
+
 
 if __name__ == "__main__":
     unittest.main()
