@@ -77,7 +77,7 @@ class EditList:
         hook = None
         h = d.get("hook")
         if isinstance(h, dict) and str(h.get("text", "")).strip():
-            max_sec = max(10.0, float(duration or 180.0))
+            max_sec = max(10.0, float(duration or 180.0) + 2.0)
             hook = {
                 "text": str(h["text"]).strip()[:120],
                 "seconds": max(1.0, min(max_sec, float(h.get("seconds", 3.0) or 3.0))),

@@ -27,68 +27,88 @@ FRAME = SAMPLE_RATE // 20  # 50 ms analysis frames
 
 def extract_audio_features(video_path: Path) -> dict[str, np.ndarray]:
     """Returns {feature_name: array indexed by second}. Empty dict if the
-    video has no audio stream."""
-    pcm = _decode_mono_pcm(video_path)
-    if pcm.size < SAMPLE_RATE:
-        return {}
-
-    # 50 ms frame energies are the working unit for everything below.
-    n_frames = pcm.size // FRAME
-    frames = pcm[: n_frames * FRAME].reshape(n_frames, FRAME).astype(np.float32)
-    frame_rms = np.sqrt((frames**2).mean(axis=1))
+    video has no audio stream. Streams 60s chunks from FFmpeg so even 7h+
+    VODs use <5 MB RAM instead of buffering gigabytes of PCM."""
+    import subprocess
 
     frames_per_sec = SAMPLE_RATE // FRAME
-    n_secs = n_frames // frames_per_sec
-    if n_secs == 0:
-        return {}
+    sec_bytes = SAMPLE_RATE * 2  # 16-bit mono PCM per second
+    chunk_bytes = sec_bytes * 60  # 60s (~1.92 MB) per read
 
-    per_sec = frame_rms[: n_secs * frames_per_sec].reshape(n_secs, frames_per_sec)
-    loudness = per_sec.mean(axis=1)
-
-    # Spike: this second vs. rolling 30s median loudness (clamped ratio).
-    spike = loudness / np.maximum(_rolling_median(loudness, 30), 1e-6)
-    spike = np.clip(spike, 0, 5)
-
-    # Burst: count of frame-level onsets (energy jumping >2x over the
-    # previous frame) per second — laughter and applause are onset-dense.
-    onsets = frame_rms[1:] > 2.0 * np.maximum(frame_rms[:-1], 1e-6)
-    onsets = np.concatenate([[False], onsets])
-    burst = (
-        onsets[: n_secs * frames_per_sec]
-        .reshape(n_secs, frames_per_sec)
-        .sum(axis=1)
-        .astype(np.float32)
-    )
-
-    # Noisiness: zero-crossing rate per second.
-    signs = np.signbit(frames)
-    frame_zcr = (signs[:, 1:] != signs[:, :-1]).mean(axis=1)
-    noisiness = (
-        frame_zcr[: n_secs * frames_per_sec].reshape(n_secs, frames_per_sec).mean(axis=1)
-    )
-    # Only count noisiness when something is actually audible.
-    audible = loudness > max(loudness.mean() * 0.3, 1e-6)
-    noisiness = noisiness * audible
-
-    return {
-        "loudness": loudness,
-        "spike": spike,
-        "burst": burst,
-        "noisiness": noisiness.astype(np.float32),
-    }
-
-
-def _decode_mono_pcm(video_path: Path) -> np.ndarray:
     cmd = [
         ffmpeg(), "-v", "error",
         "-i", str(video_path),
         "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
         "-f", "s16le", "-",
     ]
-    result = cancel.run(cmd)  # stops if the video is cancelled (#113)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg audio decode failed:\n{result.stderr[-1000:].decode(errors='replace')}")
-    return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    loudness_chunks: list[np.ndarray] = []
+    burst_chunks: list[np.ndarray] = []
+    zcr_chunks: list[np.ndarray] = []
+    leftover = b""
+    prev_last_rms: float | None = None
+
+    try:
+        assert proc.stdout is not None
+        while True:
+            cancel.check_active()
+            raw = proc.stdout.read(chunk_bytes)
+            if not raw:
+                break
+            buf = leftover + raw
+            usable_bytes = (len(buf) // sec_bytes) * sec_bytes
+            leftover = buf[usable_bytes:]
+            if usable_bytes == 0:
+                continue
+
+            pcm = np.frombuffer(buf[:usable_bytes], dtype=np.int16).astype(np.float32) / 32768.0
+            n_secs = usable_bytes // sec_bytes
+            n_frames = n_secs * frames_per_sec
+            frames = pcm.reshape(n_frames, FRAME)
+            frame_rms = np.sqrt((frames ** 2).mean(axis=1))
+
+            per_sec_rms = frame_rms.reshape(n_secs, frames_per_sec)
+            loudness_chunks.append(per_sec_rms.mean(axis=1).astype(np.float32))
+
+            if prev_last_rms is None:
+                prev_arr = np.concatenate([[frame_rms[0]], frame_rms[:-1]])
+                onsets = frame_rms > 2.0 * np.maximum(prev_arr, 1e-6)
+                onsets[0] = False
+            else:
+                prev_arr = np.concatenate([[prev_last_rms], frame_rms[:-1]])
+                onsets = frame_rms > 2.0 * np.maximum(prev_arr, 1e-6)
+            prev_last_rms = float(frame_rms[-1])
+            burst_chunks.append(onsets.reshape(n_secs, frames_per_sec).sum(axis=1).astype(np.float32))
+
+            signs = np.signbit(frames)
+            frame_zcr = (signs[:, 1:] != signs[:, :-1]).mean(axis=1)
+            zcr_chunks.append(frame_zcr.reshape(n_secs, frames_per_sec).mean(axis=1).astype(np.float32))
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+    stderr_bytes = proc.stderr.read() if proc.stderr else b""
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"ffmpeg audio decode failed:\n{stderr_bytes[-1000:].decode(errors='replace')}")
+    if not loudness_chunks:
+        return {}
+
+    loudness = np.concatenate(loudness_chunks)
+    spike = loudness / np.maximum(_rolling_median(loudness, 30), 1e-6)
+    spike = np.clip(spike, 0, 5)
+    burst = np.concatenate(burst_chunks)
+    noisiness = np.concatenate(zcr_chunks)
+    audible = loudness > max(float(loudness.mean()) * 0.3, 1e-6)
+    noisiness = (noisiness * audible).astype(np.float32)
+
+    return {
+        "loudness": loudness,
+        "spike": spike,
+        "burst": burst,
+        "noisiness": noisiness,
+    }
 
 
 def _rolling_median(x: np.ndarray, window: int) -> np.ndarray:

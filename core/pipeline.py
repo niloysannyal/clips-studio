@@ -822,7 +822,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         banner = hook_banners[idx] if idx < len(hook_banners) else ""
         if banner and not ((opts or {}).get("edit") or {}).get("hook"):
             existing_edit = dict((opts or {}).get("edit") or {})
-            existing_edit["hook"] = {"text": banner, "seconds": round(max(1.0, candidate.duration), 2)}
+            existing_edit["hook"] = {"text": banner, "seconds": round(max(1.0, candidate.duration + END_PAD + 0.25), 2)}
             opts = {**(opts or {}), "edit": existing_edit}
         return opts
 
@@ -1785,7 +1785,7 @@ def _render_files(
         explicit_caption_y = True
     elif not explicit_caption_y and isinstance(opts.get("gaming"), dict) and opts["gaming"].get("layout") == "split":
         caption_style = dict(caption_style or {})
-        caption_style["caption_y"] = 0.44
+        caption_style["caption_y"] = 0.52
     # Where someone other than the main speaker talks, when the caption style
     # asks for them in a second colour (#126). Empty for every other clip.
     turns: list = []
@@ -1843,8 +1843,11 @@ def _render_files(
         from video.captions import caption_font_for
         from video_editor.overlay import ensure_hook
 
+        hook_cfg = dict(edit.hook)
+        if float(hook_cfg.get("seconds", 0.0)) >= candidate.duration - 0.15:
+            hook_cfg["seconds"] = round(candidate.duration + END_PAD + 0.25, 2)
         ass_path = ensure_hook(
-            ass_path, clip_dir / f"{stem}.ass", edit.hook, canvas=canvas,
+            ass_path, clip_dir / f"{stem}.ass", hook_cfg, canvas=canvas,
             font=caption_font_for(content_language, None) or "Arial Black",
         )
 

@@ -251,7 +251,7 @@ def render(intermediate: Path, output: Path, g: dict, config: dict, ass_path: Pa
     ):
         from video.captions import reposition_ass_captions
 
-        default_split_cy = 0.44
+        default_split_cy = 0.52
         reposition_ass_captions(ass_path, default_split_cy, (layout.OUT_W, layout.OUT_H))
     compose.render(intermediate, output, p, ass_path=ass_path, vf_extra=vf_extra, normalize=normalize, is_preview=is_preview)
     face = None

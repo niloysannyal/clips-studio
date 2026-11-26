@@ -131,9 +131,115 @@ def _load_model(model_size: str, device: str):
     return load(model_size, device="cpu", compute_type="auto")
 
 
+def _probe_duration(video_path: Path) -> float:
+    from core.binaries import ffprobe
+
+    try:
+        res = cancel.run(
+            [
+                ffprobe(), "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ]
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return max(0.0, float(res.stdout.strip()))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _decode_audio_slice(video_path: Path, start: float, duration: float):
+    import numpy as np
+    from core.binaries import ffmpeg
+
+    cmd = [
+        ffmpeg(), "-v", "error",
+        "-ss", f"{max(0.0, start):.3f}",
+        "-t", f"{max(0.1, duration):.3f}",
+        "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-f", "s16le", "-",
+    ]
+    res = cancel.run(cmd)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg audio slice failed:\n{res.stderr[-800:].decode(errors='replace')}")
+    return np.frombuffer(res.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+_CHUNK_THRESHOLD_S = 1800.0
+_CHUNK_SECONDS = 1800.0
+
+
+def _run_chunked(model, video_path: Path, total_dur: float, language: str | None, hotwords: str | None = None):
+    """Transcribe long VODs (>30m) in 30-minute PCM slices (~110 MB each) to prevent 1.5GB+ decode OOM."""
+    from types import SimpleNamespace
+
+    segments: list[Segment] = []
+    detected_lang = language
+    last_emit = 0.0
+    offset = 0.0
+
+    while offset < total_dur - 0.5:
+        cancel.check_active()
+        slice_len = min(_CHUNK_SECONDS, total_dur - offset)
+        pcm = _decode_audio_slice(video_path, offset, slice_len)
+        if pcm.size < 1600:
+            offset += _CHUNK_SECONDS
+            continue
+
+        raw_segments, info = model.transcribe(
+            pcm,
+            language=detected_lang,
+            vad_filter=True,
+            beam_size=1,
+            condition_on_previous_text=False,
+            word_timestamps=True,
+            **({"hotwords": hotwords} if hotwords else {}),
+        )
+        if not detected_lang and getattr(info, "language", None):
+            detected_lang = info.language
+
+        for seg in raw_segments:
+            cancel.check_active()
+            words = [
+                {
+                    "start": round(offset + w.start, 2),
+                    "end": round(offset + w.end, 2),
+                    "word": w.word.strip(),
+                }
+                for w in (seg.words or [])
+            ]
+            abs_start = round(offset + seg.start, 2)
+            abs_end = round(offset + seg.end, 2)
+            segments.append(
+                Segment(
+                    start=abs_start,
+                    end=abs_end,
+                    text=seg.text.strip(),
+                    words=words or None,
+                )
+            )
+            print(f"\r  Transcribed up to {abs_end:7.1f}s / {total_dur:.0f}s", end="", flush=True)
+            if total_dur and abs_end - last_emit >= max(5.0, total_dur * 0.02):
+                progress.emit(stage="transcribe", fraction=min(1.0, abs_end / total_dur))
+                last_emit = abs_end
+        del pcm
+        offset += _CHUNK_SECONDS
+
+    print()
+    return segments, SimpleNamespace(language=detected_lang or "en", duration=total_dur)
+
+
 def _run(model, video_path: Path, language: str | None, hotwords: str | None = None):
     """(segments, info) for one pass of Whisper over the video. hotwords:
     names to listen for (sports.hotwords), else Whisper as always."""
+    total_dur = _probe_duration(video_path)
+    if total_dur > _CHUNK_THRESHOLD_S:
+        print(f"  Long VOD ({total_dur:.0f}s): transcribing in 30-min low-memory slices")
+        return _run_chunked(model, video_path, total_dur, language, hotwords)
+
     raw_segments, info = model.transcribe(
         str(video_path),
         # None = auto-detect; a forced code fixes bilingual streams where

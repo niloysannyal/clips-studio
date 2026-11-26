@@ -34,10 +34,21 @@ def extract_visual_features(video_path: Path) -> dict[str, np.ndarray]:
     if frames.shape[0] < 2:
         return {}
 
-    # Per-sample raw signals.
-    diffs = np.abs(np.diff(frames.astype(np.float32), axis=0)).mean(axis=(1, 2))
-    diffs = np.concatenate([[0.0], diffs])
-    brightness = frames.mean(axis=(1, 2), dtype=np.float32)
+    # Per-sample raw signals computed in 1000-frame batches so long VODs never allocate gigabytes of float32.
+    n_frames = frames.shape[0]
+    diffs = np.zeros(n_frames, dtype=np.float32)
+    brightness = np.zeros(n_frames, dtype=np.float32)
+    batch = 1000
+    for start_idx in range(0, n_frames, batch):
+        end_idx = min(n_frames, start_idx + batch)
+        chunk_f = frames[start_idx:end_idx].astype(np.float32)
+        brightness[start_idx:end_idx] = chunk_f.mean(axis=(1, 2))
+        if start_idx == 0:
+            if end_idx > 1:
+                diffs[1:end_idx] = np.abs(np.diff(chunk_f, axis=0)).mean(axis=(1, 2))
+        else:
+            prev_f = frames[start_idx - 1 : end_idx - 1].astype(np.float32)
+            diffs[start_idx:end_idx] = np.abs(chunk_f - prev_f).mean(axis=(1, 2))
     flash_raw = np.abs(np.concatenate([[0.0], np.diff(brightness)]))
 
     # A hard cut is a frame difference far above the local baseline AND
