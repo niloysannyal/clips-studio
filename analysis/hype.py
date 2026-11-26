@@ -63,9 +63,9 @@ def audience_curve(url: str, video_id: str, duration: float) -> np.ndarray | Non
 
 def audience_signals(url: str, video_id: str, duration: float) -> tuple[np.ndarray | None, list]:
     """(the hype curve, the chat messages it came from). The messages are
-    [(offset seconds, author, text)] when the curve came from chat replay, for
-    the gaming profile's reading of what chat said (analysis/chat_moments.py);
-    empty for the other sources. Never raises."""
+    [(offset seconds, author, text)] when the curve came from chat replay or
+    timestamped YouTube comments, for the gaming profile's reading of what
+    viewers said (analysis/chat_moments.py); empty for the other sources. Never raises."""
     try:
         if video_id.startswith("tw_clip_"):
             return None, []
@@ -83,11 +83,24 @@ def audience_signals(url: str, video_id: str, duration: float) -> tuple[np.ndarr
             return organic, []
 
         heat = _youtube_heatmap(url, duration)
+        comment_curve, comment_msgs = _youtube_comment_signals(url, duration)
         if heat is not None:
-            return heat, []
+            if comment_curve is not None:
+                n = min(heat.size, comment_curve.size)
+                fused = heat.copy()
+                fused[:n] = np.maximum(heat[:n], comment_curve[:n])
+                return fused, comment_msgs
+            return heat, comment_msgs
 
         messages = _youtube_live_chat(url, video_id, duration)
-        return _chatters_to_curve(messages, duration), messages
+        chat_curve = _chatters_to_curve(messages, duration)
+        all_msgs = [*messages, *comment_msgs]
+        if chat_curve is not None and comment_curve is not None:
+            n = min(chat_curve.size, comment_curve.size)
+            fused = chat_curve.copy()
+            fused[:n] = np.maximum(chat_curve[:n], comment_curve[:n])
+            return fused, all_msgs
+        return (chat_curve if chat_curve is not None else comment_curve), all_msgs
     except Exception as e:
         print(f"      (audience signal unavailable: {e})")
         return None, []
@@ -457,6 +470,95 @@ def _yt_text(renderer: dict) -> str:
 
 
 # ---- curve ------------------------------------------------------------------
+
+
+_TS_RE = re.compile(r"\b(?:(\d{1,2}):)?(\d{1,3}):(\d{2})\b")
+_REACTION_KEYWORDS = (
+    "clip", "no way", "bro", "6 stars", "six stars", "bigfoot",
+    "ending", "insane", "crazy", "wtf", "omg", "goat", "w ",
+)
+_REAL_YT_URL_RE = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/|/live/)[A-Za-z0-9_-]{11}")
+
+
+def _parse_timestamp_token(hours_s: str | None, mins_s: str, secs_s: str, duration: float) -> float | None:
+    try:
+        secs = int(secs_s)
+        mins = int(mins_s)
+        hours = int(hours_s) if hours_s is not None else 0
+    except ValueError:
+        return None
+    if secs >= 60 or (hours_s is not None and mins >= 60):
+        return None
+    offset = float(hours * 3600 + mins * 60 + secs)
+    if offset < 0 or (duration > 0 and offset > duration):
+        return None
+    return offset
+
+
+def parse_youtube_comments(
+    comments: list[dict], duration: float
+) -> tuple[np.ndarray | None, list[tuple[float, str, str]]]:
+    """Turn YouTube comments with MM:SS / H:MM:SS timestamps and reaction keywords
+    into a 0..1 per-second hype curve plus chat-shaped (offset, author, text) hits."""
+    if not comments or duration <= BIN_SECONDS:
+        return None, []
+    n_bins = int(duration // BIN_SECONDS) + 1
+    weights = np.zeros(n_bins, dtype=np.float32)
+    hits: list[tuple[float, str, str]] = []
+    for entry in comments:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        lowered = f" {text.lower()} "
+        kw_bonus = 0.6 if any(kw in lowered for kw in _REACTION_KEYWORDS) else 0.0
+        likes = max(0, int(entry.get("like_count") or 0))
+        weight = 1.0 + min(3.0, float(np.log1p(likes)) * 0.4) + kw_bonus
+        author = str(entry.get("author") or entry.get("author_id") or "yt_commenter")
+        for m in _TS_RE.finditer(text):
+            offset = _parse_timestamp_token(m.group(1), m.group(2), m.group(3), duration)
+            if offset is None:
+                continue
+            b = int(offset // BIN_SECONDS)
+            if 0 <= b < n_bins:
+                weights[b] += weight
+                hits.append((offset, author, text[:240]))
+    if not hits or weights.max() <= 0:
+        return None, []
+    nonzero = weights[weights > 0]
+    order = weights.argsort(kind="stable").argsort(kind="stable").astype(np.float32)
+    ranked = np.where(weights > 0, order / max(weights.size - 1, 1), 0.0).astype(np.float32)
+    if nonzero.size > 0 and float(ranked.max()) > 0:
+        ranked = ranked / float(ranked.max())
+    curve = _clip_scale_interest(np.repeat(ranked, BIN_SECONDS)[: int(duration) + 1])
+    print(f"      YouTube comment timestamps: {len(hits)} timestamp(s) extracted")
+    return curve, hits
+
+
+def _youtube_comment_signals(url: str, duration: float) -> tuple[np.ndarray | None, list[tuple[float, str, str]]]:
+    """Fast, bounded YouTube comment timestamp fetch via yt-dlp."""
+    import subprocess
+    import sys
+
+    if not url or not _REAL_YT_URL_RE.search(url):
+        return None, []
+    try:
+        res = subprocess.run(
+            [
+                sys.executable, "-m", "yt_dlp",
+                "--dump-single-json", "--skip-download", "--no-warnings",
+                "--extractor-args", "youtube:max_comments=60,all,60,0",
+                url,
+            ],
+            capture_output=True, text=True, timeout=25,
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return None, []
+        info = json.loads(res.stdout)
+        return parse_youtube_comments(info.get("comments") or [], duration)
+    except Exception:
+        return None, []
 
 
 def _chatters_to_curve(times: list[tuple], duration: float) -> np.ndarray | None:

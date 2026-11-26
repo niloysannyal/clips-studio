@@ -452,6 +452,40 @@ def _export_clip(args: dict) -> str:
     return "Exported:\n" + "\n".join(str(p) for p in exported)
 
 
+def _wantedfeed_package(args: dict) -> str:
+    payload = {
+        k: args[k]
+        for k in ("hook_text", "channel_name", "title", "summary", "platform_hint")
+        if k in args and args[k]
+    }
+    pkg = _request("POST", f"/clips/{int(args['clip_id'])}/package", payload)
+    files = pkg.get("files") or {}
+    sched = (pkg.get("schedule_bst") or {}).get("scheduled_bst", "")
+    return json.dumps(
+        {
+            "streamer": (pkg.get("streamer") or {}).get("name"),
+            "titles": pkg.get("titles"),
+            "scheduled_bst": sched,
+            "safety": pkg.get("safety"),
+            "files": files,
+        },
+        indent=2,
+    )
+
+
+def _bounty_timer(args: dict) -> str:
+    action = str(args.get("action") or "start").lower()
+    if action == "list":
+        return json.dumps(_request("GET", "/bounty/timers"), indent=2)
+    payload = {
+        "clip_id": args["clip_id"],
+        "campaign_name": args["campaign_name"],
+        "post_url": args["post_url"],
+        "window_minutes": int(args.get("window_minutes", 30)),
+    }
+    return json.dumps(_request("POST", "/bounty/timer", payload), indent=2)
+
+
 def _engine_status(_args: dict) -> str:
     health = _request("GET", "/health", timeout=10.0)
     return (
@@ -1209,6 +1243,40 @@ TOOLS: list[dict] = [
             "required": ["clip_id", "folder"],
         },
         "handler": _export_clip,
+    },
+    {
+        "name": "wantedfeed_package",
+        "title": "Generate WantedFeed multi-platform metadata package",
+        "description": "Build and write validated <clip>_meta.json and <clip>_meta.md for YouTube Shorts, Meta Reels, TikTok, Threads, and X with BST scheduling and safety status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "clip_id": {"type": "integer"},
+                "hook_text": {"type": "string"},
+                "channel_name": {"type": "string"},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "platform_hint": {"type": "string"},
+            },
+            "required": ["clip_id"],
+        },
+        "handler": _wantedfeed_package,
+    },
+    {
+        "name": "bounty_timer",
+        "title": "Track a 30-minute Clipster/Whop bounty submission timer",
+        "description": "Start or list 30-minute live-URL bounty submission countdown timers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["start", "list"], "default": "start"},
+                "clip_id": {"type": ["integer", "string"]},
+                "campaign_name": {"type": "string"},
+                "post_url": {"type": "string"},
+                "window_minutes": {"type": "integer", "default": 30},
+            },
+        },
+        "handler": _bounty_timer,
     },
     {
         "name": "engine_status",

@@ -91,6 +91,9 @@ def has_text(cfg: dict) -> bool:
 
 def has_image(cfg: dict, asset_dir: Path) -> bool:
     cfg = resolve_config(cfg)
+    co = cfg.get("campaign_overlay")
+    if isinstance(co, dict) and co.get("path") and Path(str(co["path"])).is_file():
+        return True
     if cfg.get("type") not in ("image", "both"):
         return False
     name = safe_name(str(cfg.get("image_asset") or ""))
@@ -224,71 +227,103 @@ def _asset_in(asset_dir: Path, name: str) -> Path | None:
     return None
 
 
-def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir: Path) -> None:
-    """Overlay the logo onto the video IN PLACE (transparent PNG, aspect kept,
-    positioned + scaled + faded per the config). One extra encode; runs only
-    when an image watermark is set."""
-    cfg = resolve_config(cfg)
-    # The asset name comes from a saved branding profile, which is user
-    # supplied JSON — not from the upload endpoint, which generates a content
-    # hash. Nothing checked it, so "../../../<anything>" resolved happily and
-    # was then handed to FFmpeg as an input file. Two checks: the name must be
-    # a plain filename, and the result must still land inside the asset folder.
-    name = safe_name(str(cfg.get("image_asset") or ""))
-    if not name:
-        raise ValueError(f"invalid branding asset name: {cfg.get('image_asset')!r}")
-    # Take the path from the FOLDER rather than building it from the name.
-    # Same file, same resulting command, but the value now originates in a
-    # directory listing instead of in stored config — so it can only ever be
-    # something that genuinely sits in the assets folder. The name check
-    # above still runs first; this is the structural half of it.
-    logo = _asset_in(asset_dir, name)
-    if logo is None:
-        raise ValueError(f"branding asset not found in the assets folder: {name!r}")
-    w, h = canvas
-    pad = round(float(cfg.get("padding", 0.04)) * min(w, h))
-    logo_w = max(16, round(float(cfg.get("scale", 0.18)) * w))
-    opacity = max(0.0, min(1.0, float(cfg.get("opacity", 0.85))))
-    if cfg.get("position") == "custom":
-        # Dragged point: x,y are frame fractions for the logo's CENTRE.
-        fx = max(0.0, min(1.0, float(cfg.get("x", 0.5))))
-        fy = max(0.0, min(1.0, float(cfg.get("y", 0.5))))
-        xexpr, yexpr = f"W*{fx:.4f}-w/2", f"H*{fy:.4f}-h/2"
-    elif cfg.get("position") == "moving":
-        # Orbit a small circle at one side, then TELEPORT to the other. The
-        # side is a step function of t — nothing interpolates between them,
-        # so the logo never crosses the middle of the shot.
-        radius = max(2, round(min(w, h) * CIRCLE_FRAC))
-        inset = pad + radius            # keep the whole orbit inside the pad
-        rx, lx = f"(W-w-{inset})", f"{inset}"
-        d = MOVE_DWELL
-        side = f"if(lt(mod(t,{2 * d:g}),{d:g}),{rx},{lx})"   # which edge, now
-        ang = f"(2*PI*t/{d:g})"                              # one turn per stay
-        xexpr = f"{side}+{radius}*cos({ang})"
-        yexpr = f"(H-h)/2+{radius}*sin({ang})"
-    else:
-        xexpr, yexpr = _OVERLAY_XY.get(cfg.get("position", "bottom_right"), _OVERLAY_XY["bottom_right"])
-        xexpr, yexpr = xexpr.format(p=pad), yexpr.format(p=pad)
+def _campaign_overlay_path(cfg: dict) -> Path | None:
+    co = cfg.get("campaign_overlay")
+    if not isinstance(co, dict) or not co.get("path"):
+        return None
+    p = Path(str(co["path"]))
+    return p if p.is_file() else None
 
-    logo_chain = f"[1:v]scale={logo_w}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={opacity:.3f}"
-    rot = float(cfg.get("rotation", 0) or 0)
-    if abs(rot) > 0.1:
-        logo_chain += f",rotate={rot}*PI/180:ow=rotw({rot}*PI/180):oh=roth({rot}*PI/180):c=none"
-    # Commas inside the overlay x/y EXPRESSION (mod/if/…) must be escaped so
-    # the filtergraph parser doesn't read them as filter separators.
-    xe, ye = xexpr.replace(",", "\\,"), yexpr.replace(",", "\\,")
-    graph = f"{logo_chain}[wm];[0:v][wm]overlay={xe}:{ye}"
+
+def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir: Path) -> None:
+    """Overlay the logo and/or optional campaign overlay onto the video IN PLACE.
+    One extra encode; runs only when an image watermark or campaign_overlay is set."""
+    cfg = resolve_config(cfg)
+    w, h = canvas
+
+    logo: Path | None = None
+    if cfg.get("type") in ("image", "both") and cfg.get("image_asset"):
+        name = safe_name(str(cfg.get("image_asset") or ""))
+        if not name:
+            raise ValueError(f"invalid branding asset name: {cfg.get('image_asset')!r}")
+        logo = _asset_in(asset_dir, name)
+        if logo is None and _campaign_overlay_path(cfg) is None:
+            raise ValueError(f"branding asset not found in the assets folder: {name!r}")
+
+    campaign_path = _campaign_overlay_path(cfg)
+    if logo is None and campaign_path is None:
+        return
+
+    inputs = ["-i", str(video_path.resolve())]
+    chains: list[str] = []
+    cur_v = "[0:v]"
+    next_in = 1
+
+    if logo is not None:
+        inputs += ["-i", str(logo.resolve())]
+        pad = round(float(cfg.get("padding", 0.04)) * min(w, h))
+        logo_w = max(16, round(float(cfg.get("scale", 0.18)) * w))
+        opacity = max(0.0, min(1.0, float(cfg.get("opacity", 0.85))))
+        if cfg.get("position") == "custom":
+            fx = max(0.0, min(1.0, float(cfg.get("x", 0.5))))
+            fy = max(0.0, min(1.0, float(cfg.get("y", 0.5))))
+            xexpr, yexpr = f"W*{fx:.4f}-w/2", f"H*{fy:.4f}-h/2"
+        elif cfg.get("position") == "moving":
+            radius = max(2, round(min(w, h) * CIRCLE_FRAC))
+            inset = pad + radius
+            rx, lx = f"(W-w-{inset})", f"{inset}"
+            d = MOVE_DWELL
+            side = f"if(lt(mod(t,{2 * d:g}),{d:g}),{rx},{lx})"
+            ang = f"(2*PI*t/{d:g})"
+            xexpr = f"{side}+{radius}*cos({ang})"
+            yexpr = f"(H-h)/2+{radius}*sin({ang})"
+        else:
+            xexpr, yexpr = _OVERLAY_XY.get(cfg.get("position", "bottom_right"), _OVERLAY_XY["bottom_right"])
+            xexpr, yexpr = xexpr.format(p=pad), yexpr.format(p=pad)
+
+        logo_chain = f"[{next_in}:v]scale={logo_w}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={opacity:.3f}"
+        rot = float(cfg.get("rotation", 0) or 0)
+        if abs(rot) > 0.1:
+            logo_chain += f",rotate={rot}*PI/180:ow=rotw({rot}*PI/180):oh=roth({rot}*PI/180):c=none"
+        xe, ye = xexpr.replace(",", "\\,"), yexpr.replace(",", "\\,")
+        out_lbl = "[vwm]" if campaign_path is not None else "[vout]"
+        chains.append(f"{logo_chain}[wm];{cur_v}[wm]overlay={xe}:{ye}{out_lbl}")
+        cur_v = out_lbl
+        next_in += 1
+
+    if campaign_path is not None:
+        co = cfg["campaign_overlay"]
+        is_video = campaign_path.suffix.lower() in (".mp4", ".mov", ".webm", ".mkv", ".avi")
+        if is_video:
+            inputs += ["-stream_loop", "-1"]
+        inputs += ["-i", str(campaign_path.resolve())]
+        co_scale = max(0.05, min(1.0, float(co.get("scale", 0.50))))
+        co_w = max(16, round(co_scale * w))
+        co_x = max(0.0, min(1.0, float(co.get("x", 0.50))))
+        co_y = max(0.0, min(1.0, float(co.get("y", 0.72))))
+        co_op = max(0.0, min(1.0, float(co.get("opacity", 1.0))))
+        c_filters = [f"scale={co_w}:-1:flags=lanczos", "format=rgba"]
+        ck = str(co.get("chromakey") or "").strip()
+        if ck:
+            ck_hex = "0x" + ck.lstrip("#").removeprefix("0x").removeprefix("0X")
+            c_filters.append(f"chromakey={ck_hex}:0.18:0.08")
+        if co_op < 0.999:
+            c_filters.append(f"colorchannelmixer=aa={co_op:.3f}")
+        co_chain = f"[{next_in}:v]" + ",".join(c_filters) + "[camp]"
+        shortest_opt = ":shortest=1" if is_video else ""
+        chains.append(f"{co_chain};{cur_v}[camp]overlay=W*{co_x:.4f}-w/2:H*{co_y:.4f}-h/2{shortest_opt}[vout]")
+        cur_v = "[vout]"
+
+    graph = ";".join(chains)
 
     tmp = video_path.with_suffix(".wm.mp4")
     cmd = [
         ffmpeg(), "-y",
-        "-i", str(video_path.resolve()),
-        "-i", str(logo.resolve()),
+        *inputs,
         "-filter_complex", graph,
-        "-map", "0:a?",   # keep audio untouched
+        "-map", cur_v, "-map", "0:a?",
         *video_encoder_args(),
         "-c:a", "copy",
-        # It replaces the clip: its first frame at 0 with or without the edit list.
         *final_movflags(),
         str(tmp.resolve()),
     ]
@@ -296,8 +331,6 @@ def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir:
     if result.returncode != 0:
         discard(tmp)
         raise RuntimeError(f"watermark overlay failed:\n{result.stderr[-1500:]}")
-    # The clip is often open in the editor's player: Windows refuses a rename
-    # over it (WinError 5, #137) but allows writing into it.
     from video.outro import _replace_with_retry
 
     placed = _replace_with_retry(tmp, video_path, label="Watermark")

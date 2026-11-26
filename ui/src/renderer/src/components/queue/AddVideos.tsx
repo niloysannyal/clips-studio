@@ -470,10 +470,19 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
     if (!pipelines) return
     forgetGone(PREF.pipeline, pipelines)
     forgetGone(PREF.gaming_pipeline, pipelines)
+    const explicitNone = localStorage.getItem('generate-gaming-detector-explicit-none') === '1'
+    const gamingPipelines = pipelines.filter((p) => p.category === 'gaming')
+    const defaultGaming =
+      gamingPipelines.find((p) => p.id === 'colingpt9/gta-vi-highlights') ?? gamingPipelines[0]
     setSlots((prev) =>
       prev.map((s) => {
         const choice = s.options.pipeline
-        if (!choice) return s
+        if (!choice) {
+          if (s.options.gaming && !s.options.gaming_scoring && !explicitNone && defaultGaming) {
+            return { ...s, options: { ...s.options, pipeline: { id: defaultGaming.id } } }
+          }
+          return s
+        }
         const plugin = pipelines.find((p) => p.id === choice.id)
         if (!plugin) {
           const { pipeline: _gone, ...options } = s.options
@@ -656,8 +665,16 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
         delete next.gaming_scoring // offered with Vertical Live, so it goes with it
       }
     } else if (key === 'gaming') {
-      if (on) next.gaming = true
-      else {
+      if (on) {
+        next.gaming = true
+        if (!next.pipeline && !next.gaming_scoring) {
+          const explicitNone = localStorage.getItem('generate-gaming-detector-explicit-none') === '1'
+          const gamingPipelines = (pipelines ?? []).filter((p) => p.category === 'gaming')
+          const preferred =
+            gamingPipelines.find((p) => p.id === 'colingpt9/gta-vi-highlights') ?? gamingPipelines[0]
+          if (!explicitNone && preferred) next.pipeline = { id: preferred.id }
+        }
+      } else {
         delete next.gaming
         delete next.gaming_layout
         delete next.gaming_remember
@@ -1107,9 +1124,13 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                   onChange={(choice) => {
                     const next = { ...slot.options }
                     if (choice.id) {
+                      localStorage.removeItem('generate-gaming-detector-explicit-none')
                       next.pipeline = choice
                       delete next.gaming_scoring
-                    } else delete next.pipeline
+                    } else {
+                      localStorage.setItem('generate-gaming-detector-explicit-none', '1')
+                      delete next.pipeline
+                    }
                     const done = withoutPipelineInSteps(next)
                     rememberPlugins(done)
                     replaceOptions(slot.key, done)

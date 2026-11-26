@@ -432,6 +432,26 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     # same evidence a gaming stream gets, plus the sport's own.
     sport_name = modes.sport(config)
     known_games = list(getattr(video, "games", None) or []) or db.video_games(video.video_id)
+    if not known_games and (source_name == "local" or str(url).startswith("local:")):
+        known_games = infer_local_games(
+            title=getattr(video, "title", "") or "",
+            channel=getattr(video, "channel", "") or "",
+            game_hint=str(config["clips"].get("game_hint") or ""),
+        )
+        if known_games:
+            video.games = known_games
+            db.set_video_games(video.video_id, known_games)
+
+    effective_url = url
+    if source_name == "local":
+        try:
+            vrow = db.conn.execute(
+                "SELECT source_url FROM videos WHERE video_id = ?", (video.video_id,)
+            ).fetchone()
+            stored_url = str(vrow["source_url"] or "").strip() if vrow else ""
+        except Exception:
+            stored_url = ""
+        effective_url = stored_url or str(config["clips"].get("source_url") or "").strip() or url
 
     def _fetch_hype() -> None:
         if whole:
@@ -439,7 +459,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         try:
             from analysis.hype import audience_signals
 
-            curve, messages = audience_signals(url, video.video_id, video.duration)
+            curve, messages = audience_signals(effective_url, video.video_id, video.duration)
             if curve is not None:
                 hype_out["curve"] = curve
             # What chat said, for a gaming stream's reading of its reactions.
@@ -451,7 +471,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
             # A file cached before the game was recorded: ask the platform once.
             from sources.dispatch import game_info
 
-            hype_out["games"] = game_info(url)
+            hype_out["games"] = game_info(effective_url)
 
     hype_thread = threading.Thread(target=_fetch_hype, daemon=True, name="hype-prepass")
     hype_thread.start()
@@ -556,6 +576,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
             candidates, rejections = gaming_plugins.review(
                 candidates, video=video, segments=segments, llm=llm, config=find_config,
                 profile=gaming_profile, signals=signals_out.get("signals"), chat=chat, sounds=sounds,
+                hype_curve=hype_out.get("curve"),
             )
     else:
         intent = clip_direction(config, llm, video.duration)
@@ -573,6 +594,22 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
             **({"intent": intent} if intent is not None else {}),
         )
         candidates = _refine_windows(sport_profile, candidates, video, segments, config)
+    if candidates and not whole:
+        try:
+            from publish.wantedfeed_packager import ingest_kpi_metrics, resolve_streamer
+
+            kpis = ingest_kpi_metrics()
+            resolved = resolve_streamer(getattr(video, "channel", "") or "")
+            kpi_row = kpis.get(resolved["name"]) or kpis.get(getattr(video, "channel", "") or "")
+            if kpi_row and kpi_row.get("weight_multiplier") is not None:
+                weight = float(kpi_row["weight_multiplier"])
+                if weight != 1.0:
+                    for c in candidates:
+                        c.score = max(0, min(100, int(round(c.score * weight))))
+                        c.subscores = dict(c.subscores or {})
+                        c.subscores["kpi_weight"] = weight
+        except Exception as e:
+            print(f"      (WantedFeed KPI weighting skipped: {e})")
     step_report = []
     if steps_chosen and candidates:
         candidates, rejections, step_report = plugin_steps.after_finding(
@@ -814,9 +851,35 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
                 repeated_failures = 0
                 print(f"      Render failed for {where}: {reason}")
             return
+        safety = None
+        if not whole:
+            try:
+                from analysis.safety import analyze_candidate_safety
+
+                safety = analyze_candidate_safety(final_path, config)
+                candidate.subscores = dict(candidate.subscores or {})
+                candidate.subscores["safety"] = safety
+            except Exception as e:
+                print(f"      (Safety pre-flight skipped: {e})")
         made_seconds[str(final_path)] = seconds
         clip = _register_clip(db, video.video_id, candidate, final_path, meta,
                               render_opts_json, config)
+        try:
+            from publish.wantedfeed_packager import build_package, write_package_files
+
+            pkg = build_package(
+                clip_path=final_path,
+                channel_name=getattr(video, "channel", "") or "",
+                title=getattr(meta, "title", "") or getattr(video, "title", "") or final_path.stem,
+                hook_text=getattr(candidate, "hook", "") or "",
+                summary=getattr(meta, "description", "") or "",
+                duration_s=seconds,
+                platform_hint=source_name,
+                safety=safety,
+            )
+            write_package_files(final_path, pkg)
+        except Exception as e:
+            print(f"      (WantedFeed package skipped: {e})")
         if clip:
             rendered.append(clip)
         made.append(clip or RenderedClip(source_video_id=video.video_id, candidate=candidate, path=final_path))
@@ -1173,6 +1236,28 @@ def _try_gaming_render(intermediate: Path, render_path: Path, opts: dict, config
             return {**settings, "layout": plan.kind, "used_preset": plan.preset, "used_cam": None}
         print(f"      (Gaming layout failed, using the standard layout: {e})")
         return None
+
+
+_GTA6_KEYWORDS = (
+    "gta 6", "gta6", "gta vi", "grand theft auto vi", "grand theft auto 6",
+    "vice city", "rockstar", "gta",
+    "ishowspeed", "typical gamer", "caseoh", "kai cenat", "kaicenat",
+    "lacy", "xqc", "ohnepixel", "jynxzi", "summit1g",
+)
+
+
+def infer_local_games(title: str = "", channel: str = "", game_hint: str = "") -> list[str]:
+    """Infer game metadata for local .mp4 uploads so Gaming detectors still run."""
+    hint = (game_hint or "").strip()
+    if hint:
+        low = hint.lower()
+        if any(k in low for k in ("gta", "grand theft auto", "vice city")):
+            return ["Grand Theft Auto VI"]
+        return [hint]
+    haystack = f"{title} {channel}".lower()
+    if any(k in haystack for k in _GTA6_KEYWORDS):
+        return ["Grand Theft Auto VI"]
+    return []
 
 
 def _gaming_scoring_inputs(config: dict, video, db: StateDB, games: list, hype_out: dict,

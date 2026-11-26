@@ -244,6 +244,7 @@ class LocalVideoIn(BaseModel):
     # original link). Optional: never invented. Kept with the video so the
     # clips' publishing footers can point back to it.
     source_url: str = ""
+    game_hint: str = ""
     # The rest of the per-video options, so an uploaded file can be set up
     # exactly like a pasted link — the list builder offers the same switches
     # for both, and a switch that silently did nothing on your own upload
@@ -327,6 +328,21 @@ class ExportIn(BaseModel):
 class BatchExportIn(BaseModel):
     clip_ids: list[int]
     folder: str
+
+
+class PackageIn(BaseModel):
+    hook_text: str = ""
+    channel_name: str = ""
+    title: str = ""
+    summary: str = ""
+    platform_hint: str = ""
+
+
+class BountyTimerIn(BaseModel):
+    clip_id: int | str
+    campaign_name: str
+    post_url: str
+    window_minutes: int = 30
 
 
 class ModelIn(BaseModel):
@@ -587,6 +603,10 @@ def _process_options(body, into: dict | None = None, data_dir: Path | None = Non
         payload["min_score"] = max(0, min(100, body.min_score))
     if getattr(body, "hashtags", None):
         payload["hashtags"] = [str(h) for h in body.hashtags if str(h).strip()]
+    if getattr(body, "game_hint", None):
+        payload["game_hint"] = str(body.game_hint).strip()
+    if getattr(body, "source_url", None):
+        payload["source_url"] = str(body.source_url).strip()
     if getattr(body, "then", None):
         payload["then"] = body.then
     if getattr(body, "webhook_url", None):
@@ -1153,13 +1173,25 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             original = body.source_url.strip()
             if original and platform_of_link(original):
                 d.set_video_source(vid, original, platform_of_link(original))
+            from core.pipeline import infer_local_games
+
+            inferred_games = infer_local_games(
+                title=title, channel=body.channel.strip(), game_hint=body.game_hint.strip()
+            )
+            if inferred_games:
+                d.set_video_games(vid, inferred_games)
             if body.channel.strip():
                 from creator.identity import tag_video
 
                 tag_video(d, vid, body.channel.strip(), platform=platform)
             # force is part of the job, as for a pasted link: without it "Make clips
             # again" on an uploaded file finished at once, with nothing made.
-            payload = _process_options(body, {"url": f"local:{vid}", "force": body.force}, data_dir=data_dir)
+            extra_into = {"url": f"local:{vid}", "force": body.force}
+            if original:
+                extra_into["source_url"] = original
+            if body.game_hint.strip():
+                extra_into["game_hint"] = body.game_hint.strip()
+            payload = _process_options(body, extra_into, data_dir=data_dir)
             job_id = d.add_job("process", json.dumps(payload), video_id=vid, title=title)
         finally:
             d.close()
@@ -2505,6 +2537,77 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         finally:
             d.close()
         return exported
+
+    @app.post("/clips/{clip_id}/package")
+    def package_clip(clip_id: int, body: PackageIn | None = None):
+        d = db()
+        try:
+            row = d.get_clip(clip_id)
+            if row is None:
+                raise HTTPException(404, "no such clip")
+            vrow = d.conn.execute(
+                "SELECT title, channel_name, source_platform FROM videos WHERE video_id = ?",
+                (row["video_id"],),
+            ).fetchone()
+        finally:
+            d.close()
+
+        clip_path = Path(row["path"] or f"clip_{clip_id}.mp4")
+        try:
+            scores = json.loads(row["scores"]) if row["scores"] else {}
+        except ValueError:
+            scores = {}
+        safety = scores.get("safety") if isinstance(scores, dict) else None
+        duration_s = float((row["end_s"] or 0.0) - (row["start_s"] or 0.0))
+        req = body or PackageIn()
+        channel_name = req.channel_name or (vrow["channel_name"] if vrow else "") or ""
+        title = req.title or row["title"] or (vrow["title"] if vrow else "") or clip_path.stem
+        hook_text = req.hook_text or row["hook"] or ""
+        summary = req.summary or row["description"] or ""
+        platform_hint = req.platform_hint or (vrow["source_platform"] if vrow else "") or ""
+
+        from publish.wantedfeed_packager import build_package, write_package_files
+
+        try:
+            pkg = build_package(
+                clip_path=clip_path,
+                channel_name=channel_name,
+                title=title,
+                hook_text=hook_text,
+                summary=summary,
+                duration_s=max(1.0, duration_s),
+                platform_hint=platform_hint,
+                safety=safety,
+            )
+            if clip_path.parent.exists():
+                json_path, md_path = write_package_files(clip_path, pkg)
+                pkg["files"] = {"json": str(json_path), "markdown": str(md_path)}
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        return pkg
+
+    @app.post("/bounty/timer")
+    def create_bounty_timer(body: BountyTimerIn):
+        from publish.wantedfeed_packager import start_bounty_timer
+
+        return start_bounty_timer(
+            body.clip_id,
+            body.campaign_name,
+            body.post_url,
+            window_minutes=body.window_minutes,
+        )
+
+    @app.get("/bounty/timers")
+    def get_bounty_timers():
+        from publish.wantedfeed_packager import list_bounty_timers
+
+        return {"timers": list_bounty_timers()}
+
+    @app.get("/kpi/weights")
+    def get_kpi_weights():
+        from publish.wantedfeed_packager import ingest_kpi_metrics
+
+        return {"streamers": ingest_kpi_metrics()}
 
     # ---- watermark & branding ------------------------------------------------
 

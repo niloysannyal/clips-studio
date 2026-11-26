@@ -11,7 +11,8 @@ def is_detector(choice, data_dir):
     return installed is not None and installed.manifest.get("category") == "gaming"
 
 
-def review(candidates, *, video, segments, llm, config, profile, signals=None, chat=None, sounds=None):
+def review(candidates, *, video, segments, llm, config, profile, signals=None, chat=None, sounds=None,
+           hype_curve=None):
     """Review the detector's windows with Gaming's shared evidence and vision.
 
     Never call the generic finder or add windows here. The plugin's score and
@@ -40,6 +41,8 @@ def review(candidates, *, video, segments, llm, config, profile, signals=None, c
     if sounds is not None:
         sources += [(sounds.game, 0.7), (sounds.people, 0.5)]
         events += list(sounds.events)
+    if hype_curve is not None and getattr(hype_curve, "size", 0):
+        sources.append((hype_curve, 0.85))
     game_curve = fusion._soft_or(sources)
     scoring = config.get("scoring", {})
     if scoring.get("read_screen", True) and game_curve.size and getattr(profile, "reads_screen", True):
@@ -57,6 +60,12 @@ def review(candidates, *, video, segments, llm, config, profile, signals=None, c
             candidate.subscores["visual"] = round(fusion._window_mean(visual, candidate.start, candidate.end) * 100)
         if game_curve.size:
             candidate.subscores["game"] = round(fusion._window_peak(game_curve, candidate.start, candidate.end) * 100)
+        if hype_curve is not None and getattr(hype_curve, "size", 0):
+            hype_peak = float(fusion._window_peak(hype_curve, candidate.start, candidate.end))
+            if hype_peak >= 0.55:
+                bonus = round(min(8.0, hype_peak * 8.0))
+                candidate.score = min(100, int(candidate.score) + bonus)
+                candidate.subscores["hype_bonus"] = bonus
     if scoring.get("look_at_game", True):
         fusion._look_at_game(candidates, video.path, llm, profile, segments, sorted(events, key=lambda row: row[0]))
     minimum = config["clips"]["min_score"]
