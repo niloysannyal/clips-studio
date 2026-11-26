@@ -876,6 +876,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
                 duration_s=seconds,
                 platform_hint=source_name,
                 safety=safety,
+                llm=llm,
             )
             write_package_files(final_path, pkg)
         except Exception as e:

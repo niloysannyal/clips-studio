@@ -81,25 +81,180 @@ def resolve_streamer(channel_name: str, platform_hint: str = "", watchlist_path:
     }
 
 
-def _fit_short_title(core: str, suffix: str = "#GTA6 #Shorts", limit: int = 59) -> str:
-    clean = re.sub(r"\s+", " ", core).strip().strip('"\'')
-    max_core = limit - len(suffix) - 1
+def _fit_short_title(core: str, suffix: str = "#GTA6 #Shorts", limit: int = 59, end_punct: str = "") -> str:
+    clean = re.sub(r"\s+", " ", core).strip().strip('"\'.,;:')
+    if end_punct and clean.endswith(end_punct):
+        clean = clean[:-len(end_punct)].rstrip()
+    max_core = limit - len(suffix) - 1 - len(end_punct)
     if len(clean) > max_core:
-        clean = clean[:max_core].rsplit(" ", 1)[0].strip() or clean[:max_core]
+        trimmed = clean[:max_core].rsplit(" ", 1)[0].strip() or clean[:max_core]
+        clean = trimmed.rstrip(" ,;:-")
+    if end_punct:
+        clean = f"{clean}{end_punct}"
     return f"{clean} {suffix}".strip()
 
 
-def build_three_pattern_titles(base_title: str, streamer_name: str, hook_text: str = "") -> dict[str, str]:
-    """Generate Pattern 1/2/3 titles strictly under 60 chars ending with #GTA6 #Shorts."""
-    core_topic = (hook_text or base_title or "GTA 6 Moment").strip()
-    core_topic = re.sub(r"#\w+", "", core_topic).strip()
-    words = core_topic.split()
-    short_topic = " ".join(words[:5]) if words else "GTA 6 Moment"
+_PRESERVE_UPPER = {
+    "GTA", "VI", "V", "NPC", "FPS", "DLC", "RP", "FBI", "LSPD", "US",
+    "POV", "IRL", "HUD", "PVP", "AI", "VIP", "TV", "PC",
+}
+_MINOR_WORDS = {
+    "a", "an", "and", "as", "at", "by", "for", "from", "in", "into",
+    "of", "on", "or", "the", "to", "vs", "with",
+}
+_VERB_BASE_MAP = {
+    "pulls": "pull", "pulled": "pull",
+    "survives": "survive", "survived": "survive",
+    "escapes": "escape", "escaped": "escape",
+    "steals": "steal", "stole": "steal",
+    "triggers": "trigger", "triggered": "trigger",
+    "breaks": "break", "broke": "break",
+    "tests": "test", "tested": "test",
+    "finds": "find", "found": "find",
+    "hits": "hit",
+    "gets": "get", "got": "get",
+    "reaches": "reach", "reached": "reach",
+    "fails": "fail", "failed": "fail",
+    "tries": "try", "tried": "try",
+    "plays": "play", "played": "play",
+    "wins": "win", "won": "win",
+    "loses": "lose", "lost": "lose",
+    "fights": "fight", "fought": "fight",
+    "beats": "beat",
+    "pushes": "push", "pushed": "push",
+}
 
-    p1 = _fit_short_title(f"{streamer_name}: {short_topic}")
-    p2 = _fit_short_title(f"What Happens When {short_topic}?")
-    p3 = _fit_short_title(f"GTA 6 vs GTA 5: {short_topic}")
-    return {"pattern_1_reaction": p1, "pattern_2_mechanic": p2, "pattern_3_contrast": p3}
+
+def _strip_streamer_prefix(text: str, streamer_name: str) -> str:
+    out = text.strip()
+    if not streamer_name:
+        return out
+    variants = {streamer_name.strip(), re.sub(r"\s+", "", streamer_name.strip())}
+    for v in sorted(variants, key=len, reverse=True):
+        if v:
+            out = re.sub(rf"^(?:@?{re.escape(v)})\b[\s:,\-—]*", "", out, flags=re.IGNORECASE).strip()
+    return out
+
+
+def _normalize_topic_phrase(raw: str, streamer_name: str = "") -> str:
+    """Clean hashtags/placeholders and normalize ALL-CAPS text to readable Title/Sentence Case."""
+    s = re.sub(r"#\w+", "", raw or "")
+    s = _PLACEHOLDER_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip().strip('"\'.,!?:;-')
+    s = _strip_streamer_prefix(s, streamer_name)
+    s = re.sub(r"\b(?:in|on|at)\s+GTA\s*(?:6|VI)\b", "", s, flags=re.IGNORECASE).strip(" ,;:-")
+    s = re.sub(r"\bGTA\s*(?:6|VI)\b", "", s, flags=re.IGNORECASE).strip(" ,;:-")
+    if not s:
+        return ""
+    tokens = s.split()
+    out: list[str] = []
+    for idx, tok in enumerate(tokens):
+        clean_tok = tok.strip(".,!?:;\"'")
+        upper_tok = clean_tok.upper()
+        if upper_tok in _PRESERVE_UPPER or clean_tok.isdigit():
+            out.append(upper_tok if upper_tok in _PRESERVE_UPPER else tok)
+        elif clean_tok.isupper() or idx == 0:
+            low = clean_tok.lower()
+            if idx > 0 and low in _MINOR_WORDS:
+                out.append(low)
+            else:
+                out.append(low.capitalize())
+        else:
+            # Preserve intentional mixed casing (e.g. IShowSpeed, xQc, iPhone)
+            out.append(tok if any(c.isupper() for c in clean_tok[1:]) else (clean_tok.lower() if (idx > 0 and clean_tok.lower() in _MINOR_WORDS) else clean_tok.capitalize()))
+    return " ".join(out)
+
+
+def _to_when_clause(raw: str, streamer_name: str = "") -> str:
+    phrase = _normalize_topic_phrase(raw, streamer_name=streamer_name)
+    if not phrase:
+        return "You Test This Mechanic"
+    words = phrase.split()
+    first_low = words[0].lower()
+    if first_low in ("you", "players", "someone", "cops", "police", "npcs", "they"):
+        return " ".join(words[:5])
+    if first_low in ("he", "she"):
+        words = words[1:]
+        if not words:
+            return "You Test This Mechanic"
+        first_low = words[0].lower()
+    if first_low in _VERB_BASE_MAP:
+        words[0] = _VERB_BASE_MAP[first_low].capitalize()
+        clause = ["You", *words[:4]]
+        return " ".join(clause)
+    if first_low in ("after", "during", "inside", "before", "without", "at", "on", "in"):
+        return " ".join(["You", "Play", *words[:3]])
+    return " ".join(["You", "Try", *words[:4]])
+
+
+def _sanitize_llm_title(raw: str, fallback: str) -> str:
+    if not raw or not isinstance(raw, str):
+        return fallback
+    cleaned = re.sub(r"#\w+", "", raw).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip('"\' ')
+    if not cleaned or _PLACEHOLDER_RE.search(cleaned):
+        return fallback
+    # Reject shouted all-caps titles from an LLM
+    alpha = [c for c in cleaned if c.isalpha()]
+    if alpha and sum(1 for c in alpha if c.isupper()) / len(alpha) > 0.70:
+        return fallback
+    end_p = "?" if cleaned.endswith("?") else ""
+    return _fit_short_title(cleaned, end_punct=end_p)
+
+
+def build_three_pattern_titles(
+    base_title: str,
+    streamer_name: str,
+    hook_text: str = "",
+    *,
+    summary: str = "",
+    llm=None,
+) -> dict[str, str]:
+    """Generate Pattern 1/2/3 titles strictly under 60 chars ending with #GTA6 #Shorts.
+
+    Derives clean sentence/title-cased phrasing from summary & base_title (never
+    pasting all-caps overlay hooks verbatim into mechanic/contrast templates), with
+    optional LLM generation when an llm backend is provided.
+    """
+    reaction_src = _normalize_topic_phrase(base_title, streamer_name=streamer_name)
+    summary_src = _normalize_topic_phrase(summary, streamer_name=streamer_name)
+    hook_src = _normalize_topic_phrase(hook_text, streamer_name=streamer_name)
+
+    reaction_phrase = reaction_src or summary_src or hook_src or "Wild GTA 6 Moment"
+    mechanic_seed = summary or base_title or hook_text
+    when_clause = _to_when_clause(mechanic_seed, streamer_name=streamer_name)
+    contrast_phrase = summary_src or reaction_src or hook_src or "Gameplay Details"
+
+    fallback = {
+        "pattern_1_reaction": _fit_short_title(f"{streamer_name}: {reaction_phrase}"),
+        "pattern_2_mechanic": _fit_short_title(f"What Happens When {when_clause}", end_punct="?"),
+        "pattern_3_contrast": _fit_short_title(f"GTA 6 vs GTA 5: {contrast_phrase}"),
+    }
+
+    if llm is not None:
+        try:
+            prompt = (
+                "Write 3 distinct YouTube Shorts title cores (MAX 42 characters each, NO hashtags, "
+                "NO brackets, NO ALL CAPS) for a GTA 6 clip.\n"
+                f"Streamer: {streamer_name}\n"
+                f"Clip Title: {base_title}\n"
+                f"Summary/Transcript: {summary or hook_text}\n"
+                "Return JSON only with keys:\n"
+                '- "pattern_1_reaction": Streamer reaction/milestone angle\n'
+                '- "pattern_2_mechanic": Must start with "What Happens When " and end with "?"\n'
+                '- "pattern_3_contrast": Must start with "GTA 6 vs GTA 5: "\n'
+            )
+            raw = llm.generate(prompt, json_mode=True)
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(data, dict):
+                return {
+                    k: _sanitize_llm_title(str(data.get(k) or ""), fallback[k])
+                    for k in ("pattern_1_reaction", "pattern_2_mechanic", "pattern_3_contrast")
+                }
+        except Exception:
+            pass
+
+    return fallback
 
 
 def validate_no_placeholders(obj) -> None:
@@ -316,10 +471,17 @@ def build_package(
     safety: dict | None = None,
     watchlist_path: Path | None = None,
     tracker_path: Path | None = None,
+    llm=None,
 ) -> dict:
     """Build complete validated multi-platform metadata package for WantedFeed."""
     streamer = resolve_streamer(channel_name, platform_hint=platform_hint, watchlist_path=watchlist_path)
-    titles = build_three_pattern_titles(title, streamer["name"], hook_text=hook_text)
+    titles = build_three_pattern_titles(
+        title,
+        streamer["name"],
+        hook_text=hook_text,
+        summary=summary,
+        llm=llm,
+    )
     safety = safety or {}
     gore_warning = bool(safety.get("gore_safety_warning", False))
     music_risk = bool(safety.get("music_copyright_risk", False))
