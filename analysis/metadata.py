@@ -322,3 +322,79 @@ def _clean_hashtags(tags) -> list[str]:
             if word and tag != "#shorts" and tag not in cleaned:
                 cleaned.append(tag)
     return cleaned[:5]
+
+
+_HOOK_BATCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"index": {"type": "integer"}, "hook": {"type": "string"}},
+                "required": ["index", "hook"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
+
+
+def _clean_hook_banner(text: str, max_words: int = 6) -> str:
+    """Format a punchy 4-6 word uppercase curiosity pill banner."""
+    cleaned = re.sub(r"[<>\"'{}]", "", str(text or "")).strip()
+    words = [w for w in cleaned.split() if w]
+    if len(words) > max_words:
+        words = words[:max_words]
+    return " ".join(words).upper()[:48].strip()
+
+
+def _fallback_hook_banner(candidate: ClipCandidate, meta: ClipMetadata | None = None) -> str:
+    raw = (candidate.hook or (meta.title if meta else "") or "WATCH THIS CLIP").strip()
+    return _clean_hook_banner(raw, max_words=6) or "WATCH THIS CLIP"
+
+
+def generate_hook_banners_batch(
+    candidates: list[ClipCandidate],
+    segments: list[Segment],
+    metas: list[ClipMetadata],
+    llm: LLMBackend,
+    batch_size: int = 8,
+) -> list[str]:
+    """Generate a punchy 4-6 word uppercase curiosity hook banner per clip."""
+    banners = [_fallback_hook_banner(c, m) for c, m in zip(candidates, metas)]
+    for base in range(0, len(candidates), batch_size):
+        batch = candidates[base : base + batch_size]
+        blocks = []
+        for i, c in enumerate(batch):
+            text = _clip_text(c, segments)[:600]
+            blocks.append(f"CLIP {i}:\n{text or '(no speech)'}")
+        prompt = (
+            "Write a short 4 to 6 word UPPERCASE curiosity hook banner for the top of each vertical gaming/reaction clip.\n"
+            "Examples: AFTER 52 HOURS | 6 STARS IN GTA 6 | WORLD'S FIRST JET STEAL | HE BROKE VICE CITY\n"
+            "Rules: 4-6 words MAX, punchy, grounded in the clip transcript, no hashtags, no quotes.\n"
+            'Respond ONLY with valid JSON: {"items": [{"index": 0, "hook": "..."}]}\n\n'
+            + "\n\n".join(blocks)
+        )
+        try:
+            raw = generate_json(llm, prompt, _HOOK_BATCH_SCHEMA)
+            parsed = _parse(raw)
+        except Exception:
+            parsed = None
+        items = (parsed or {}).get("items") if isinstance(parsed, dict) else None
+        if not isinstance(items, list):
+            continue
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                idx = int(entry["index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= idx < len(batch):
+                cleaned = _clean_hook_banner(entry.get("hook", ""))
+                if cleaned:
+                    banners[base + idx] = cleaned
+    return banners

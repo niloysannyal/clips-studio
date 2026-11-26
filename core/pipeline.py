@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 
 from analysis.fusion import find_clips
-from analysis.metadata import ClipMetadata, generate_metadata_batch
+from analysis.metadata import ClipMetadata, generate_hook_banners_batch, generate_metadata_batch
 from core import cancel, progress
 from core.binaries import ffprobe
 from core.models import ClipCandidate, RenderedClip, Segment
@@ -754,7 +754,24 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
               + (" (caption style, colours and branding as this job sets them)"
                  if modes.sport(config) else ""))
 
-    def _opts_for(candidate, meta) -> dict | None:
+    if not whole:
+        trimmed_candidates = []
+        raw_sigs = signals_out.get("signals")
+        for c in candidates:
+            if choices.get(_window(c)):
+                trimmed_candidates.append(c)
+            else:
+                trimmed_candidates.append(trim_leading_dead_air(c, segments, signals=raw_sigs))
+        candidates = trimmed_candidates
+
+    auto_hook = bool((config.get("captions") or {}).get("auto_hook", True)) and not whole
+    hook_banners = (
+        generate_hook_banners_batch(candidates, segments, metas, llm)
+        if auto_hook
+        else [""] * len(candidates)
+    )
+
+    def _opts_for(idx, candidate, meta) -> dict | None:
         """One clip's render options: the job's, with the creator's saved
         choices over them when the clip has some, and a basketball clip's
         play (its moment and kind) for its framing."""
@@ -765,6 +782,11 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         stop = _stop_by(candidate)
         if stop is not None:
             opts = {**(opts or {}), "stop_by": stop}
+        banner = hook_banners[idx] if idx < len(hook_banners) else ""
+        if banner and not ((opts or {}).get("edit") or {}).get("hook"):
+            existing_edit = dict((opts or {}).get("edit") or {})
+            existing_edit["hook"] = {"text": banner, "seconds": min(3.5, max(1.0, candidate.duration))}
+            opts = {**(opts or {}), "edit": existing_edit}
         return opts
 
     def _finish(candidate, meta, get_result) -> None:
@@ -807,9 +829,9 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
             futures = {
                 pool.submit(
                     _render_files, video.path, candidate, segments, clip_dir, config,
-                    _opts_for(candidate, meta), content_lang,
+                    _opts_for(idx, candidate, meta), content_lang,
                 ): (candidate, meta)
-                for candidate, meta in zip(candidates, metas)
+                for idx, (candidate, meta) in enumerate(zip(candidates, metas))
             }
             for future in as_completed(futures):
                 # Every render is submitted up front, so cancelling has to reach
@@ -820,10 +842,11 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
                 candidate, meta = futures[future]
                 _finish(candidate, meta, future.result)
     else:
-        for candidate, meta, get_result in remote.render_all(
+        for idx, (candidate, meta, get_result) in enumerate(remote.render_all(
             video.video_id, video.path, list(zip(candidates, metas)), segments, clip_dir, config,
-            gaming_opts, content_lang, workers, opts_for=_opts_for,
-        ):
+            gaming_opts, content_lang, workers,
+            opts_for=lambda c, m: _opts_for(candidates.index(c), c, m),
+        )):
             _finish(candidate, meta, get_result)
 
     if repeated_failures:
@@ -1478,6 +1501,73 @@ def _drop_post_style(opts: dict) -> dict:
 END_PAD = 0.4            # a clip's render runs this far past its end: Whisper's word ends run early
 
 
+def trim_leading_dead_air(
+    candidate: ClipCandidate,
+    segments: list[Segment],
+    signals: tuple | None = None,
+    *,
+    min_dead_air_s: float = 0.80,
+    preroll_s: float = 0.25,
+    min_duration_s: float = 10.0,
+) -> ClipCandidate:
+    """Advance candidate.start past leading dead air / static silence (> min_dead_air_s)
+    so every clip opens directly on speech or a high-energy audio/motion spike."""
+    from dataclasses import replace
+
+    first_speech_start: float | None = None
+    for seg in segments:
+        if seg.end <= candidate.start or seg.start >= candidate.end:
+            continue
+        if seg.words:
+            for w in seg.words:
+                if float(w["end"]) > candidate.start and float(w["start"]) < candidate.end:
+                    t = max(float(candidate.start), float(w["start"]))
+                    if first_speech_start is None or t < first_speech_start:
+                        first_speech_start = t
+        else:
+            t = max(float(candidate.start), float(seg.start))
+            if first_speech_start is None or t < first_speech_start:
+                first_speech_start = t
+
+    first_spike_s: float | None = None
+    if signals and isinstance(signals, tuple) and len(signals) == 2:
+        import numpy as np
+
+        audio_raw, visual_raw = signals
+        s_idx = max(0, int(candidate.start))
+        e_limit = first_speech_start if first_speech_start is not None else candidate.end
+        e_idx = max(s_idx, int(math.ceil(min(candidate.end, e_limit))))
+        for source_dict, key in ((audio_raw, "spike"), (audio_raw, "rms"), (visual_raw, "motion")):
+            if not isinstance(source_dict, dict) or key not in source_dict:
+                continue
+            arr = source_dict[key]
+            if getattr(arr, "size", 0) <= s_idx:
+                continue
+            clip_slice = arr[s_idx : min(int(math.ceil(candidate.end)), arr.size)]
+            if clip_slice.size < 2:
+                continue
+            thresh = float(np.percentile(clip_slice, 80))
+            if thresh <= 0:
+                continue
+            for sec in range(s_idx, min(e_idx, arr.size)):
+                if float(arr[sec]) >= thresh:
+                    t = max(float(candidate.start), float(sec))
+                    if first_spike_s is None or t < first_spike_s:
+                        first_spike_s = t
+                    break
+
+    candidates_t = [t for t in (first_speech_start, first_spike_s) if t is not None]
+    if not candidates_t:
+        return candidate
+    first_action = min(candidates_t)
+    if first_action - candidate.start <= min_dead_air_s:
+        return candidate
+    new_start = round(max(candidate.start, first_action - preroll_s), 2)
+    if candidate.end - new_start < min_duration_s:
+        return candidate
+    return replace(candidate, start=new_start)
+
+
 def _render_files(
     source: Path,
     candidate: ClipCandidate,
@@ -1606,6 +1696,9 @@ def _render_files(
     # asks for them in a second colour (#126). Empty for every other clip.
     turns: list = []
     if captions_on(config, opts):
+        cap_cfg = config.get("captions") or {}
+        max_gap_s = float(cap_cfg.get("max_gap_s", 0.60))
+        max_duration_s = float(cap_cfg.get("max_duration_s", 2.50))
         lines = opts.get("caption_lines")  # user-corrected caption text, if any
         if _wants_second_speaker(config, opts):
             from video.captions import DEFAULT_STYLE, build_caption_lines, paint_turns, tag_lines, words_of
@@ -1623,7 +1716,10 @@ def _render_files(
                 lines = tag_lines(lines, said, words_of(segments, candidate))
             elif said:
                 wpc = {**DEFAULT_STYLE, **(caption_style or {})}["words_per_caption"]
-                lines = build_caption_lines(segments, candidate, wpc, said)
+                lines = build_caption_lines(
+                    segments, candidate, wpc, said,
+                    max_gap_s=max_gap_s, max_duration_s=max_duration_s,
+                )
         if edit is not None and (edit.keep is not None or abs(edit.speed - 1) >= 0.01):
             # Sections were cut out and/or the clip was sped up: every
             # surviving caption shifts to its new time on the edited timeline.
@@ -1632,7 +1728,10 @@ def _render_files(
 
             if lines is None:
                 wpc = {**DEFAULT_STYLE, **(caption_style or {})}["words_per_caption"]
-                lines = build_caption_lines(segments, candidate, wpc)
+                lines = build_caption_lines(
+                    segments, candidate, wpc,
+                    max_gap_s=max_gap_s, max_duration_s=max_duration_s,
+                )
             lines = remap_lines(lines, edit)
         ass_path = build_captions(
             segments, candidate, clip_dir / f"{stem}.ass",
@@ -1640,6 +1739,8 @@ def _render_files(
             lines=lines,
             canvas=canvas,
             language=content_language,
+            max_gap_s=max_gap_s,
+            max_duration_s=max_duration_s,
         )
 
     # Hook title (big text, top third, first few seconds) burns through the

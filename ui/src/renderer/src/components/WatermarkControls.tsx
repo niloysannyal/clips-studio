@@ -254,7 +254,38 @@ export default function WatermarkControls({
           </div>
         )}
 
-        {/* position + sliders */}
+        {/* safe-zone preset + position + sliders */}
+        <div className="flex items-center gap-2 text-xs flex-wrap">
+          <span className="label">Preset</span>
+          <select
+            className="bg-base border border-raised rounded px-2 py-1 text-xs"
+            aria-label={t('Watermark preset')}
+            value={
+              config.position === 'custom' &&
+              Math.abs((config.x ?? 0.5) - 0.5) < 0.02 &&
+              Math.abs((config.y ?? 0.5) - 0.16) < 0.02 &&
+              Math.abs((config.opacity ?? 0.85) - 0.45) < 0.02 &&
+              Math.abs((config.scale ?? 0.18) - 0.24) < 0.02
+                ? 'safe_top_center'
+                : ''
+            }
+            onChange={(e) => {
+              if (e.target.value === 'safe_top_center') {
+                onChange({
+                  position: 'custom',
+                  x: 0.50,
+                  y: 0.16,
+                  opacity: 0.45,
+                  scale: 0.24
+                })
+              }
+            }}
+          >
+            <option value="">{t('Custom / Manual')}</option>
+            <option value="safe_top_center">{t('Safe Top-Center (16% Y, 45%)')}</option>
+          </select>
+        </div>
+
         <div className="flex items-center gap-2 text-xs flex-wrap">
           <span className="label">Position</span>
           {POSITIONS.map((p) => (

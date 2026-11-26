@@ -89,6 +89,9 @@ def build_caption_lines(
     candidate: ClipCandidate,
     words_per_caption: int = 3,
     turns: list | None = None,
+    *,
+    max_gap_s: float = 0.60,
+    max_duration_s: float = 2.50,
 ) -> list[dict]:
     """The caption lines for one clip as editable data:
     [{"start", "end", "text"}] with times relative to the clip start.
@@ -103,7 +106,7 @@ def build_caption_lines(
     lines = []
     heard = bool(_turns(turns))
     for speaker, said in _by_speaker(words, turns, candidate.start, candidate.end):
-        groups = _grouped(said, size)
+        groups = _grouped(said, size, max_gap_s=max_gap_s, max_duration_s=max_duration_s)
         if heard:
             groups = _standing(groups, size, candidate.start, candidate.end)
         for group in groups:
@@ -114,7 +117,7 @@ def build_caption_lines(
                 # it: the caption stays up until that word has been said.
                 stands = [i for i, w in enumerate(group) if _stands(w, candidate.start, candidate.end)]
                 last = max(w["end"] for w in group[stands[-1] if stands else 0:])
-            end = min(candidate.duration, last - candidate.start)
+            end = min(candidate.duration, last - candidate.start, start + max_duration_s)
             if end <= start:
                 continue
             line = {"start": round(start, 2), "end": round(end, 2), "text": " ".join(w["word"] for w in group)}
@@ -459,6 +462,9 @@ def build_captions(
     lines: list[dict] | None = None,
     canvas: tuple[int, int] = (1080, 1920),
     language: str = "en",
+    *,
+    max_gap_s: float | None = None,
+    max_duration_s: float | None = None,
 ) -> Path | None:
     """Write an ASS file with times relative to the clip start.
     `lines` (user-corrected caption text) overrides the generated ones.
@@ -466,10 +472,15 @@ def build_captions(
     1920x1080 and the style scales to it). Returns the path, or None if
     there is nothing to caption."""
     opts = {**DEFAULT_STYLE, **(style or {})}
+    gap_s = max(0.05, float(max_gap_s if max_gap_s is not None else opts.get("max_gap_s", 0.60)))
+    dur_s = max(0.20, float(max_duration_s if max_duration_s is not None else opts.get("max_duration_s", 2.50)))
     # Non-Latin content: swap in a font that has the glyphs (see SCRIPT_FONTS).
     opts["font"] = caption_font_for(language, opts.get("font")) or opts.get("font")
     if lines is None:
-        lines = build_caption_lines(segments, candidate, opts["words_per_caption"])
+        lines = build_caption_lines(
+            segments, candidate, opts["words_per_caption"],
+            max_gap_s=gap_s, max_duration_s=dur_s,
+        )
 
     # Word timings for the highlight, clip-relative like `lines` are.
     spoken = (
@@ -505,11 +516,15 @@ def build_captions(
             text = text.upper()
         text = text.replace("\\", "").replace("{", "").replace("}", "")  # ASS control chars
         start, end = float(line["start"]), float(line["end"])
+        end = min(end, start + dur_s)
         if end <= start:
             continue
         tint = second if second and line.get("speaker") else None
         if opts.get("highlight"):
-            dialogue.extend(_highlighted(text, start, end, spoken, opts, tint, pos_tag))
+            dialogue.extend(_highlighted(
+                text, start, end, spoken, opts, tint, pos_tag,
+                max_gap_s=gap_s,
+            ))
         else:
             dialogue.append(
                 f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{pos_tag}{_tinted(text, tint)}"
@@ -553,7 +568,16 @@ def _tinted(text: str, tint: str | None) -> str:
 
 
 def _highlighted(
-    text: str, start: float, end: float, spoken: list[dict], opts: dict, tint: str | None = None, pos_tag: str = ""
+    text: str,
+    start: float,
+    end: float,
+    spoken: list[dict],
+    opts: dict,
+    tint: str | None = None,
+    pos_tag: str = "",
+    *,
+    max_word_tail_s: float = 1.20,
+    max_gap_s: float = 0.60,
 ) -> list[str]:
     """One Dialogue per word: the whole caption, with the word being spoken
     in the highlight colour. `tint` is the caption's own colour when it is
@@ -566,16 +590,27 @@ def _highlighted(
     tokens = text.split()
     times = _word_times(text, start, end, spoken)
     if len(tokens) < 2 or not times:
-        return [f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{pos_tag}{_tinted(text, tint)}"]
+        clamped_end = min(end, start + max_word_tail_s) if (spoken and end - start > max_word_tail_s) else end
+        if times:
+            clamped_end = min(end, max(start, times[0][1] + max_word_tail_s))
+        return [f"Dialogue: 0,{_ass_time(start)},{_ass_time(clamped_end)},Default,,0,0,0,,{pos_tag}{_tinted(text, tint)}"]
 
     base = tint or _inline_color(opts["color"])
     hot = _inline_color(opts.get("highlight_color", DEFAULT_STYLE["highlight_color"]))
     events = []
     for i, (w_start, w_end) in enumerate(times):
-        # Hold each state until the next word begins, so there is never a
-        # frame with nothing on screen between words.
+        # Hold each state until the next word begins unless there is a silence gap,
+        # in which case clear cleanly after max_word_tail_s so words never freeze.
         seg_start = start if i == 0 else max(start, w_start)
-        seg_end = end if i == len(times) - 1 else max(seg_start, min(end, times[i + 1][0]))
+        tail_limit = w_end + max_word_tail_s
+        if i == len(times) - 1:
+            seg_end = min(end, max(seg_start, tail_limit))
+        else:
+            next_start = times[i + 1][0]
+            if next_start - w_end > max_gap_s:
+                seg_end = min(end, next_start, max(seg_start, tail_limit))
+            else:
+                seg_end = max(seg_start, min(end, next_start))
         if seg_end <= seg_start:
             continue
         body = " ".join(
@@ -660,8 +695,29 @@ def _spread_evenly(seg: Segment, start: float, end: float) -> list[dict]:
     ]
 
 
-def _grouped(words: list[dict], size: int) -> list[list[dict]]:
-    return [words[i : i + size] for i in range(0, len(words), size)]
+def _grouped(
+    words: list[dict],
+    size: int,
+    max_gap_s: float = 0.60,
+    max_duration_s: float = 2.50,
+) -> list[list[dict]]:
+    """Chunk words into caption groups, splitting on silence gaps (> max_gap_s)
+    or when adding the next word would exceed max_duration_s."""
+    if not words:
+        return []
+    groups: list[list[dict]] = []
+    cur: list[dict] = []
+    for w in words:
+        if cur:
+            gap = float(w["start"]) - float(cur[-1]["end"])
+            span = float(w["end"]) - float(cur[0]["start"])
+            if len(cur) >= size or gap > max_gap_s or span > max_duration_s:
+                groups.append(cur)
+                cur = []
+        cur.append(w)
+    if cur:
+        groups.append(cur)
+    return groups
 
 
 def _ass_time(seconds: float) -> str:

@@ -11,11 +11,11 @@ from pathlib import Path
 
 
 def _hook_style(canvas: tuple[int, int], font: str = "Arial Black") -> str:
-    # Calibrated for the 1920-tall Shorts canvas; scales to other frames.
+    # Top safe-zone pill banner (y ≈ H * 0.08): bold uppercase over a dark pill backdrop.
     s = canvas[1] / 1920
     return (
-        f"Style: Hook,{font},{round(96 * s)},&H00FFFFFF,&H00FFFFFF,&H00000000,"
-        f"&H7F000000,-1,0,0,0,100,100,0,0,1,{max(3, round(9 * s))},3,8,60,60,{round(190 * s)},1"
+        f"Style: Hook,{font},{round(72 * s)},&H00FFFFFF,&H00FFFFFF,&H99000000,"
+        f"&H99000000,-1,0,0,0,100,100,0,0,3,{max(6, round(14 * s))},0,8,60,60,{round(150 * s)},1"
     )
 
 
@@ -42,7 +42,7 @@ def _ass_time(seconds: float) -> str:
 
 
 def _hook_event(text: str, seconds: float) -> str:
-    clean = text.replace("\\", "").replace("{", "").replace("}", "").strip()
+    clean = text.replace("\\", "").replace("{", "").replace("}", "").strip().upper()
     return f"Dialogue: 1,{_ass_time(0)},{_ass_time(seconds)},Hook,,0,0,0,,{clean}"
 
 

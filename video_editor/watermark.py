@@ -61,12 +61,36 @@ MOVE_DWELL = 3.4        # seconds at a side = one full revolution
 CIRCLE_FRAC = 0.022     # orbit radius as a fraction of the short frame edge
 CIRCLE_STEPS = 16       # segments approximating the circle in ASS (text mode)
 
+# Named safe-zone presets. Any config specifying position == "<preset_name>"
+# expands cleanly into explicit normalized coordinates before burning/overlaying.
+WATERMARK_PRESETS: dict[str, dict] = {
+    "safe_top_center": {
+        "position": "custom",
+        "x": 0.50,
+        "y": 0.16,
+        "opacity": 0.45,
+        "scale": 0.24,
+    },
+}
+
+
+def resolve_config(cfg: dict) -> dict:
+    """Expand named presets (e.g. 'safe_top_center') into explicit coordinates."""
+    if not isinstance(cfg, dict):
+        return {}
+    pos = cfg.get("position")
+    if isinstance(pos, str) and pos in WATERMARK_PRESETS:
+        return {**cfg, **WATERMARK_PRESETS[pos]}
+    return cfg
+
 
 def has_text(cfg: dict) -> bool:
+    cfg = resolve_config(cfg)
     return cfg.get("type") in ("text", "both") and bool(str(cfg.get("text", "")).strip())
 
 
 def has_image(cfg: dict, asset_dir: Path) -> bool:
+    cfg = resolve_config(cfg)
     if cfg.get("type") not in ("image", "both"):
         return False
     name = safe_name(str(cfg.get("image_asset") or ""))
@@ -174,6 +198,7 @@ def ensure_text(
     """Merge the watermark text into the clip's ASS file (or write a
     standalone one). Static by default; 'moving' position hops it around the
     edges (TikTok-style, anti-crop). Returns the ASS file to burn."""
+    cfg = resolve_config(cfg)
     text = str(cfg["text"]).replace("\\", "").replace("{", "").replace("}", "").strip()
     style = _text_style(cfg, canvas)
     event = _text_events(text, cfg, duration, canvas)
@@ -203,6 +228,7 @@ def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir:
     """Overlay the logo onto the video IN PLACE (transparent PNG, aspect kept,
     positioned + scaled + faded per the config). One extra encode; runs only
     when an image watermark is set."""
+    cfg = resolve_config(cfg)
     # The asset name comes from a saved branding profile, which is user
     # supplied JSON — not from the upload endpoint, which generates a content
     # hash. Nothing checked it, so "../../../<anything>" resolved happily and
